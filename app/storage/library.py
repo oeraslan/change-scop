@@ -32,7 +32,11 @@ THUMB_SIZE = 320
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 RESULT_FORMAT_VERSION = 1
 
-Image.MAX_IMAGE_PIXELS = None  # uydu görüntüleri çok büyük olabilir; kişisel kullanım
+# Uydu görüntüleri büyük olabilir: Pillow sınırı 400 MP'ye yükseltilir ama korumayı tamamen kapatmaz
+# (core/registration/preprocess.py ile aynı sınır; süreç geneli ayar olduğu için None yapılmamalı).
+MAX_IMAGE_PIXELS = 400_000_000
+if Image.MAX_IMAGE_PIXELS is not None and Image.MAX_IMAGE_PIXELS < MAX_IMAGE_PIXELS:
+    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 
 def default_library_dir() -> Path:
