@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import logging
 import sys
 import tempfile
@@ -14,6 +15,7 @@ from app.prefs import load_prefs
 from app.storage import Library
 from app.ui.main_window import MainWindow
 from app.ui.theme import apply_app_font, apply_theme
+from core import pipeline as core_pipeline
 from core.config import load_config
 
 
@@ -31,10 +33,13 @@ def build_window(
     if demo:
         from app.demo import install_demo_pipeline, seed_demo_library
 
-        install_demo_pipeline()
+        install_demo_pipeline()          # demo kendi sahte pipeline'ını korur (configure çağrılmaz)
         if library.repo.total_image_count() == 0:
             seed_demo_library(library)
-    return MainWindow(library, config, prefs, config_path, prefs_path, probe_device=probe_device)
+    else:
+        core_pipeline.configure_default_pipeline(copy.deepcopy(config))   # --config / --library-dir dahil
+    return MainWindow(library, config, prefs, config_path, prefs_path, probe_device=probe_device,
+                      reconfigure_pipeline=not demo)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -35,6 +35,9 @@ MAX_SCALE = 40.0
 ZOOM_STEP = 1.25
 
 
+HEAT_OPACITY = 0.5      # ısı haritası katman opaklığı
+
+
 @dataclass
 class RegionSpec:
     """Bir bölge kutusunun çizim bilgisi (before koordinatları)."""
@@ -261,7 +264,7 @@ class SyncGraphicsView(QGraphicsView):
         """Isı haritası overlay'ini yumuşak geçişle açar/kapatır."""
         if self._heat_item is None:
             return
-        self._fade_item("heat", self._heat_item, 0.6 if visible else 0.0, animate)
+        self._fade_item("heat", self._heat_item, HEAT_OPACITY if visible else 0.0, animate)
 
     def set_regions(self, specs: list[RegionSpec]) -> None:
         """Bölge kutularını yeniden kurar (eskileri temizler)."""

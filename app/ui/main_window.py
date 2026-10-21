@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import shutil
 import sys
@@ -21,7 +22,11 @@ from app.ui.settings_view import SettingsView
 from app.ui.status_bar import StatusBar
 from app.ui.theme import apply_theme
 from app.ui.workers import DeviceProbe
+from core import pipeline as core_pipeline
 from core.config import AppConfig, LLM_MODELS
+
+GEMMA_DOWNLOAD_HINT = "Gemma modeli indirilmemiş: scripts/download_models.py --only gemma-12b"
+RECONFIGURE_DEBOUNCE_MS = 400
 
 log = logging.getLogger(__name__)
 
@@ -37,12 +42,20 @@ class MainWindow(FluentWindow):
         config_path: Path | None = None,
         prefs_path: Path | None = None,
         probe_device: bool = True,
+        reconfigure_pipeline: bool = True,
     ) -> None:
         super().__init__()
         self.library = library
         self.config = config
         self.prefs = prefs or UiPrefs()
         self._probe: DeviceProbe | None = None
+        self._reconfigure_enabled = reconfigure_pipeline
+        self._reconfigure_pending = False
+        self._closing = False
+        self._reconfigure_timer = QTimer(self)
+        self._reconfigure_timer.setSingleShot(True)
+        self._reconfigure_timer.setInterval(RECONFIGURE_DEBOUNCE_MS)
+        self._reconfigure_timer.timeout.connect(self._apply_pipeline_config)
         self.setWindowTitle("ChangeScope")
         self.resize(1440, 900)
         self.setMinimumSize(1000, 640)
@@ -78,13 +91,14 @@ class MainWindow(FluentWindow):
         self.settings_view.themeChanged.connect(self.set_theme)
         self.settings_view.libraryDirChanged.connect(self.switch_library)
         self.settings_view.llmEnabledChanged.connect(self._on_llm_toggled)
+        self.settings_view.pipelineSettingsChanged.connect(self.schedule_pipeline_reconfigure)
+        self.settings_view.deviceChanged.connect(self._start_device_probe)
+        self.compare_view.workersIdle.connect(self._on_workers_idle)
 
         self._update_library_info()
         self._refresh_llm_status()
         if probe_device:
-            self._probe = DeviceProbe(config.runtime.device, self)
-            self._probe.resolved.connect(self.status_bar.set_device)
-            self._probe.start()
+            self._start_device_probe(config.runtime.device)
         else:
             self.status_bar.set_device("CPU")
         self._center()
@@ -139,21 +153,56 @@ class MainWindow(FluentWindow):
         InfoBar.success("Kütüphane konumu değişti", str(new_dir), duration=4000,
                         position=InfoBarPosition.TOP_RIGHT, parent=self)
 
+    def _start_device_probe(self, preference: str) -> None:
+        """GPU/CPU bilgisini arka planda çözer (aynı thread torch/lightglue'ı da ön ısıtır)."""
+        self._probe = DeviceProbe(preference, self)
+        self._probe.resolved.connect(self.status_bar.set_device)
+        self._probe.start()
+
+    def schedule_pipeline_reconfigure(self) -> None:
+        """Pipeline'ı etkileyen bir ayar değişti: kısa gecikmeyle (kaydırıcı için) yeniden yapılandırılır."""
+        if self._reconfigure_enabled:
+            self._reconfigure_timer.start()
+
+    def _apply_pipeline_config(self) -> None:
+        """`configure_default_pipeline`'ı çağırır; karşılaştırma sürüyorsa worker'lar bitene kadar ertelenir."""
+        if not self._reconfigure_enabled:
+            return
+        if self.compare_view.has_running_workers():
+            self._reconfigure_pending = True
+            return
+        self._reconfigure_pending = False
+        core_pipeline.configure_default_pipeline(copy.deepcopy(self.config))
+
+    def _on_workers_idle(self) -> None:
+        if self._reconfigure_pending and not self._closing:
+            self._apply_pipeline_config()
+
     def _on_llm_toggled(self, on: bool) -> None:
         self.compare_view.use_llm = on
         self._refresh_llm_status()
 
     def _refresh_llm_status(self) -> None:
-        """Gemma durumu: kapalı (ayar kapalı ya da model/exe yok) veya hazır (ilk kullanımda yüklenir)."""
+        """Gemma durumu + "Yorumla" düğmesinin kullanılabilirliği (ayar kapalı / model yok / hazır)."""
         cfg = self.config
         spec = cfg.llm.model_spec
         self.compare_view.set_model_name(spec.display_name)
+        panel = self.compare_view.ai_panel
         if not cfg.llm.enabled:
             self.status_bar.set_llm_state("off")
-        elif cfg.paths.llama_server_exe.exists() and spec.gguf_path(cfg.paths.models_dir).exists():
-            self.status_bar.set_llm_state("ready", spec.display_name)
-        else:
+            panel.set_interpret_available(
+                False, "Yapay zekâ yorumu Ayarlar sayfasından kapatılmış. Açmak için Ayarlar > Yapay zekâ yorumu.",
+                "Yapay zekâ yorumu ayarlarda kapalı")
+        elif not spec.gguf_path(cfg.paths.models_dir).exists():
             self.status_bar.set_llm_state("off", "model bulunamadı")
+            panel.set_interpret_available(False, GEMMA_DOWNLOAD_HINT, "Yapay zekâ yorumu kullanılamıyor")
+        elif not cfg.paths.llama_server_exe.exists():
+            self.status_bar.set_llm_state("off", "llama-server bulunamadı")
+            panel.set_interpret_available(
+                False, f"llama-server bulunamadı: {cfg.paths.llama_server_exe}", "Yapay zekâ yorumu kullanılamıyor")
+        else:
+            self.status_bar.set_llm_state("ready", spec.display_name)
+            panel.set_interpret_available(True)
 
     def _update_library_info(self) -> None:
         repo = self.library.repo
@@ -167,9 +216,17 @@ class MainWindow(FluentWindow):
             self.move(geo.center().x() - self.width() // 2, max(0, geo.center().y() - self.height() // 2))
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        """Kapanış: pencere hemen gizlenir; çalışan işler iptal edilip beklenir, sonra pipeline kapatılır."""
+        if self._closing:
+            super().closeEvent(event)
+            return
+        self._closing = True
+        self._reconfigure_timer.stop()
+        self.hide()                       # kullanıcı bekleme görmesin
         self.library_view.shutdown()
-        self.compare_view.shutdown()
-        if self._probe is not None:
-            self._probe.wait(2000)
+        self.compare_view.shutdown()      # iptal + olay döngüsünü işleterek kısa bekleme
+        try:
+            core_pipeline.shutdown_default_pipeline()   # kurulmamışsa no-op; llama-server'ı sonlandırır
+        except Exception:  # noqa: BLE001
+            log.exception("Pipeline kapatılamadı")
         super().closeEvent(event)
-

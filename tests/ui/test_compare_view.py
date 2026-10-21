@@ -195,6 +195,7 @@ def test_ai_panel_off_state_has_interpret_button(window, qtbot) -> None:
     cv = window.compare_view
     cv.show_result(make_result(320, 240, with_llm=False))
     panel = cv.ai_panel
+    panel.set_interpret_available(True)                     # worktree'de model yok; etkin durumu zorla
     assert panel.state() == "off"
     assert panel.off_state.title_label.text() == "Yapay zekâ yorumu kapalı"
     assert panel.off_state.button.text() == "Yorumla"
@@ -273,7 +274,8 @@ def test_open_pair_runs_pipeline_saves_and_reuses_cache(window, populated, qtbot
 
     # Aynı çifti tekrar aç: pipeline çalışmaz, kayıttan yüklenir.
     window.open_compare(recs[0], recs[1])
-    assert cv._result is not None and not cv.is_busy()
+    qtbot.waitUntil(lambda: cv._result is not None, timeout=15000)
+    _wait_idle(qtbot, cv)
     assert len(calls) == 1
     assert cv.ai_panel.state() == "ready"
     assert [i.region_id for i in cv.before_view.region_items()] == [1, 2, 3]
@@ -315,17 +317,16 @@ def test_cancel_stops_comparison(window, populated, qtbot) -> None:
     assert cv._result is None and not cv.progress_host.isVisible()
 
 
-def test_unavailable_modules_show_friendly_infobar(window, populated, qtbot, monkeypatch) -> None:
+def test_missing_modules_show_generic_error_infobar(window, populated, qtbot, monkeypatch) -> None:
     _, _, recs = populated
     set_default_pipeline(None)
     monkeypatch.setattr(core_pipeline, "build_default_pipeline",
                         lambda config=None: (_ for _ in ()).throw(NotImplementedError("henüz yok")))
     cv = window.compare_view
     window.open_compare(recs[0], recs[1])
-    qtbot.waitUntil(lambda: ("error", "Analiz modülleri henüz kurulu değil") in cv.active_infobars(), timeout=10000)
+    qtbot.waitUntil(lambda: any(t == "Karşılaştırma başarısız" for _, t in cv.active_infobars()), timeout=10000)
     _wait_idle(qtbot, cv)
     assert not cv.before_view.image_rect.isEmpty()           # önizleme yine de gösterilir
-    assert cv.isVisible() or True
 
 
 def test_pipeline_error_shows_error_infobar(window, populated, qtbot) -> None:
@@ -349,6 +350,7 @@ def test_interpret_button_runs_llm_later(window, populated, qtbot) -> None:
     set_default_pipeline(make_pipeline())
     cv = window.compare_view
     window.config.llm.enabled = False                       # LLM kapalı: açılışta yorum yok
+    cv.ai_panel.set_interpret_available(True)               # (worktree'de model yok; düğmeyi zorla etkinleştir)
     window.open_compare(recs[0], recs[1])
     qtbot.waitUntil(lambda: cv._result is not None, timeout=15000)
     _wait_idle(qtbot, cv)

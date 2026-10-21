@@ -219,6 +219,8 @@ class AiPanel(Surface):
         )
         self.off_state.button.setIcon(FIF.SEND)  # type: ignore[union-attr]
         self.off_state.button.clicked.connect(self.interpretRequested)  # type: ignore[union-attr]
+        self._off_default = (self.off_state.title_label.text(), self.off_state.text_label.text())
+        self._interpret_enabled = True
 
         self.message_state = EmptyState(FIF.INFO, "", "", None, self.top, compact=True)
 
@@ -278,6 +280,22 @@ class AiPanel(Surface):
 
     def set_model_name(self, name: str) -> None:
         self.model_pill.set(name)
+
+    def interpret_enabled(self) -> bool:
+        """"Yorumla" kullanılabilir mi (LLM açık ve model kurulu)?"""
+        return self._interpret_enabled
+
+    def set_interpret_available(self, available: bool, reason: str = "", title: str = "") -> None:
+        """"Yorumla" düğmesini etkinleştirir/devre dışı bırakır; devre dışıyken nedenini açıklar."""
+        self._interpret_enabled = available
+        button = self.off_state.button
+        if button is not None:
+            button.setEnabled(available)
+            button.setToolTip("" if available else reason)
+        if available:
+            self.off_state.set_texts(*self._off_default)
+        else:
+            self.off_state.set_texts(title or self._off_default[0], reason)
 
     def _on_shimmer(self, value: float) -> None:
         for bar in self._top_bars:

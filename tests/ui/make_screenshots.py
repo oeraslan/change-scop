@@ -123,8 +123,19 @@ def main(argv: list[str] | None = None) -> int:
     for r in result.detection.regions:
         r.verdict, r.description, r.llm_confidence = r.verdict.__class__("unreviewed"), None, None
     cv.show_result(result)
+    cv.ai_panel.set_interpret_available(True)
     wait(400)
     shot(win, out, "08_ai_paneli_kapali.png")
+    # Model indirilmemiş: "Yorumla" devre dışı + açıklama
+    win.config.llm.enabled = True
+    win._refresh_llm_status()
+    wait(400)
+    shot(win, out, "15_yorumla_devre_disi_model_yok.png")
+    cv.ai_panel.set_interpret_available(
+        False, "Yapay zekâ yorumu Ayarlar sayfasından kapatılmış. Açmak için Ayarlar > Yapay zekâ yorumu.",
+        "Yapay zekâ yorumu ayarlarda kapalı")
+    wait(300)
+    shot(win, out, "16_yorumla_devre_disi_ayar_kapali.png")
 
     # Geçmiş sekmesi
     win.switchTo(lv)
