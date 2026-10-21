@@ -1,0 +1,26 @@
+# Metin dosyaları depoda LF, Windows'ta checkout'ta CRLF'e çevrilmez (tutarlı diff için)
+* text=auto eol=lf
+
+# Windows betikleri CRLF kalmalı
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# İkili dosyalar
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.tif binary
+*.tiff binary
+*.pt binary
+*.pth binary
+*.safetensors binary
+*.gguf binary
+*.onnx binary
+*.exe binary
+*.dll binary
+*.sqlite3 binary
+*.zip binary

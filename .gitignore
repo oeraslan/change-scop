@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+build/
+dist/
+*.spec
+models/*
+!models/.gitkeep
+bin/llama/*
+!bin/llama/.gitkeep
+*.sqlite3
+.pytest_cache/
