@@ -247,3 +247,36 @@ def test_run_comparison_uses_default_pipeline():
         assert STAGE_LLM_ANALYZE in stages
     finally:
         set_default_pipeline(None)
+
+
+def test_configure_and_shutdown_default_pipeline(monkeypatch):
+    import core.pipeline as cp
+
+    rec = Recorder()
+    built: list[AppConfig] = []
+
+    def fake_build(config=None):
+        built.append(config)
+        return _pipeline(rec)
+
+    monkeypatch.setattr(cp, "build_default_pipeline", fake_build)
+    monkeypatch.setattr(cp, "_default_config", None)
+    set_default_pipeline(None)
+    try:
+        cp.shutdown_default_pipeline()                 # kurulmamışken no-op
+        assert built == [] and rec.events == []
+
+        cfg = AppConfig()
+        cfg.detection.sensitivity = 0.9
+        first = cp.get_default_pipeline()
+        cp.configure_default_pipeline(cfg)             # eskisi kapatılır
+        assert "release:registrar" in rec.events
+        second = cp.get_default_pipeline()
+        assert second is not first and built[-1] is cfg
+
+        rec.events.clear()
+        cp.shutdown_default_pipeline()
+        assert "release:detector" in rec.events
+        assert cp._default_pipeline is None
+    finally:
+        set_default_pipeline(None)

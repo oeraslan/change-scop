@@ -279,6 +279,7 @@ class Pipeline:
 # ---------------------------------------------------------------------------
 
 _default_pipeline: Pipeline | None = None
+_default_config: AppConfig | None = None
 _default_lock = threading.Lock()
 
 
@@ -302,18 +303,48 @@ def build_default_pipeline(config: AppConfig | None = None) -> Pipeline:
 
 
 def set_default_pipeline(pipeline: Pipeline | None) -> None:
-    """`run_comparison`'ın kullanacağı pipeline'ı ayarlar (test / sahte pipeline için)."""
+    """`run_comparison`'ın kullanacağı pipeline'ı ayarlar (test / sahte pipeline için).
+
+    Önceki pipeline KAPATILMAZ; kapatmak için `shutdown_default_pipeline()` kullanın.
+    """
     global _default_pipeline
     with _default_lock:
         _default_pipeline = pipeline
 
 
+def configure_default_pipeline(config: AppConfig) -> None:
+    """Ayarlar değişince çağrılır: eski pipeline'ı kapatır, yenisini `config` ile kurar.
+
+    Modeller lazy yüklendiği için bu çağrı hızlıdır; bir sonraki karşılaştırma modelleri yeniden yükler.
+    Bir karşılaştırma çalışırken çağrılmamalıdır (UI, worker bitene kadar ertelemelidir).
+    """
+    global _default_pipeline, _default_config
+    with _default_lock:
+        old, _default_pipeline = _default_pipeline, None
+        _default_config = config
+    if old is not None:
+        old.shutdown()
+
+
+def shutdown_default_pipeline() -> None:
+    """Uygulama kapanırken çağrılır: modelleri bırakır ve (Faz 3) llama-server'ı sonlandırır.
+
+    Pipeline hiç kurulmadıysa hiçbir şey yapmaz (kapanışta model yüklemez).
+    """
+    global _default_pipeline
+    with _default_lock:
+        old, _default_pipeline = _default_pipeline, None
+    if old is not None:
+        old.shutdown()
+
+
 def get_default_pipeline() -> Pipeline:
-    """Varsayılan pipeline'ı döndürür; yoksa `build_default_pipeline()` ile bir kez kurar."""
+    """Varsayılan pipeline'ı döndürür; yoksa son `configure_default_pipeline` ayarıyla (yoksa
+    `load_config()`) bir kez kurar."""
     global _default_pipeline
     with _default_lock:
         if _default_pipeline is None:
-            _default_pipeline = build_default_pipeline()
+            _default_pipeline = build_default_pipeline(_default_config)
         return _default_pipeline
 
 
