@@ -424,3 +424,19 @@ def test_interpret_without_llm_returns_input():
     pipe = _pipeline(rec)
     cv = pipe.run(*_inputs(), None, use_llm=False)
     assert pipe.interpret(cv) is cv
+
+
+def test_stop_llm_server_releases_running_analyst():
+    import core.pipeline as cp
+
+    rec = Recorder()
+    analyst = ServerAnalyst(rec)
+    pipe = _pipeline(rec, analyst=analyst)
+    pipe.run(*_inputs(), None, use_llm=True)
+    set_default_pipeline(pipe)
+    try:
+        cp.stop_llm_server()
+        assert "release:llm" in rec.events and not analyst.is_server_running
+    finally:
+        set_default_pipeline(None)
+    cp.stop_llm_server()   # pipeline yokken no-op

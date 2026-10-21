@@ -491,6 +491,17 @@ def shutdown_default_pipeline() -> None:
         old.retire()   # çalışan koşu varsa onu beklemez; koşu bitince bırakılır
 
 
+def stop_llm_server() -> None:
+    """Çalışan llama-server'ı HEMEN durdurur (ör. kapanışta, LLM isteği sürerken).
+
+    Süren bölge istekleri hata alır; pipeline bunu yakalar ve CV sonucuyla döner. Pipeline kurulmamışsa
+    veya sunucu çalışmıyorsa hiçbir şey yapmaz.
+    """
+    pipe = _default_pipeline
+    if pipe is not None:
+        pipe.release_llm()
+
+
 def get_default_pipeline() -> Pipeline:
     """Varsayılan pipeline'ı döndürür; yoksa son `configure_default_pipeline` ayarıyla (yoksa
     `load_config()`) bir kez kurar."""

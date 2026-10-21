@@ -268,11 +268,9 @@ class MainWindow(FluentWindow):
 
     @staticmethod
     def _kill_llm_server() -> None:
-        """Çalışan llama-server'ı hemen durdurur (pipeline'ın analistini doğrudan kapatır)."""
-        pipe = getattr(core_pipeline, "_default_pipeline", None)
+        """Çalışan llama-server'ı hemen durdurur (süren LLM istekleri düşer, CV sonucu korunur)."""
         try:
-            if pipe is not None:
-                pipe.shutdown()
+            core_pipeline.stop_llm_server()
         except Exception:  # noqa: BLE001
             log.exception("llama-server durdurulamadı")
 
