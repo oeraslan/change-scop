@@ -387,10 +387,6 @@ def test_sqlite_failed_transaction_rolls_back_and_does_not_poison_others(tmp_pat
     assert not repo._con.in_transaction
 
 
-@pytest.mark.xfail(strict=True, reason="LibraryRepository._Tx.__enter__: lock alındıktan sonra BEGIN istisna "
-                   "fırlatırsa (ör. close() sonrası ya da disk hatası) __exit__ çağrılmaz; RLock hiç bırakılmaz ve "
-                   "diğer thread'ler SONSUZA kadar bloklanır (repository.py:423-426). acquire sonrası try/except ile "
-                   "release edin.")
 def test_sqlite_begin_failure_does_not_leak_lock(tmp_path) -> None:
     """BEGIN başarısız olunca kilit sızmamalı: başka thread `get_folder` ile bloklanmamalı."""
     repo = _repo(tmp_path)

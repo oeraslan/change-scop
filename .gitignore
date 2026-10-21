@@ -13,3 +13,7 @@ bin/llama/*
 .pytest_cache/
 tests/data/synthetic/
 .claude/worktrees/
+# Kullanıcı dışa aktarmaları (proje köküne kaydedilirse)
+/karsilastirma*.png
+/karsilastirma*.csv
+/karsilastirma*.txt
