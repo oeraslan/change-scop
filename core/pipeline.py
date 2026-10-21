@@ -97,6 +97,7 @@ class ReleasesResources(Protocol):
 
 
 AnalystFactory = Callable[[], RegionAnalyst]
+PartialResultCallback = Callable[[ComparisonResult], None]
 
 
 def free_gpu_memory() -> None:
@@ -178,6 +179,18 @@ class Pipeline:
                     return None
             return self._analyst
 
+    def release_llm(self) -> None:
+        """Çalışan LLM sunucusunu durdurur (VRAM kuralı: CV adımlarından ÖNCE çağrılır)."""
+        analyst = self._analyst
+        if analyst is None or not getattr(analyst, "is_server_running", False):
+            return
+        if isinstance(analyst, ReleasesResources):
+            try:
+                analyst.release()
+            except Exception:
+                log.exception("LLM sunucusu durdurulamadı")
+        free_gpu_memory()
+
     def release_cv_models(self) -> None:
         """CV bileşenlerinin modellerini bırakır ve VRAM'i boşaltır (LLM'den önce çağrılır)."""
         for component in (self.preprocessor, self.registrar, self.detector):
@@ -222,6 +235,7 @@ class Pipeline:
         use_llm: bool = False,
         cancel: threading.Event | None = None,
         ignore_mask: np.ndarray | None = None,
+        on_cv_result: PartialResultCallback | None = None,
     ) -> ComparisonResult:
         """İki görüntüyü karşılaştırır.
 
@@ -236,6 +250,9 @@ class Pipeline:
                 ekranda gösterilen (EXIF yönü düzeltilmiş) hali üzerinde, herhangi bir çözünürlükte
                 çizilir; hizalama çözünürlüğüne yeniden ölçeklenir ve `valid_mask`'tan çıkarılır, yani
                 o pikseller asla değişiklik sayılmaz. Hizalamayı etkilemez.
+            on_cv_result: LLM adımı yapılacaksa, CV sonucu hazır olur olmaz (LLM'den ÖNCE) bir kez
+                `llm_used=False` sonuçla çağrılır; UI kutuları hemen çizip yorumu sonra doldurabilir.
+                Pipeline thread'inden çağrılır. LLM adımı yoksa çağrılmaz.
 
         Returns:
             `ComparisonResult`. Hizalama FAILED ise `detection=None`.
@@ -247,7 +264,7 @@ class Pipeline:
         with self._state_lock:
             self._active_runs += 1
         try:
-            return self._run(before, after, progress, use_llm, cancel, ignore_mask)
+            return self._run(before, after, progress, use_llm, cancel, ignore_mask, on_cv_result)
         finally:
             with self._state_lock:
                 self._active_runs -= 1
@@ -263,6 +280,7 @@ class Pipeline:
         use_llm: bool,
         cancel: threading.Event | None,
         ignore_mask: np.ndarray | None,
+        on_cv_result: PartialResultCallback | None = None,
     ) -> ComparisonResult:
         assert self.config is not None
         report = progress or _noop_progress
@@ -275,6 +293,8 @@ class Pipeline:
                 raise ComparisonCancelled()
             report(name, fractions[name], message or STAGE_MESSAGES[name])
 
+        # VRAM kuralı: önceki karşılaştırmadan açık kalan llama-server CV modelleriyle çakışmasın.
+        self.release_llm()
         try:
             stage(STAGE_PREPROCESS)
             prepared_before = self.preprocessor.prepare(before)
@@ -300,7 +320,13 @@ class Pipeline:
         summary: str | None = None
         llm_used = False
         if llm_wanted and detection is not None and detection.regions:
-            detection, summary, llm_used = self._run_llm(registration, detection, stage)
+            if on_cv_result is not None:
+                try:
+                    on_cv_result(ComparisonResult(registration, detection, False,
+                                                  time.perf_counter() - t0, None))
+                except Exception:
+                    log.exception("on_cv_result geri çağrısı başarısız")
+            detection, summary, llm_used = self._run_llm(registration, detection, stage, report, fractions)
 
         report(STAGE_DONE, 1.0, STAGE_MESSAGES[STAGE_DONE])
         return ComparisonResult(
@@ -316,17 +342,34 @@ class Pipeline:
         registration: RegistrationResult,
         detection: DetectionResult,
         stage: Callable[..., None],
+        report: ProgressCallback = _noop_progress,
+        fractions: dict[str, float] = _FRACTIONS_WITH_LLM,
     ) -> tuple[DetectionResult, str | None, bool]:
-        """LLM adımı. Hata olursa CV sonucu aynen döner (`llm_used=False`); iptal yukarı iletilir."""
+        """LLM adımı. Hata olursa CV sonucu aynen döner (`llm_used=False`); iptal yukarı iletilir.
+
+        Analist bölgeleri yerinde doldurabildiği için KOPYA üzerinde çalışılır; `on_cv_result` ile UI'a
+        verilmiş CV sonucu başka thread'den değiştirilmez.
+        """
         analyst = self.get_analyst()
         if analyst is None:
             return detection, None, False
+        work = replace(detection, regions=[replace(r) for r in detection.regions])
+        f0 = fractions.get(STAGE_LLM_ANALYZE, 0.5)
+        f1 = fractions.get(STAGE_LLM_SUMMARIZE, 0.9)
+
+        def on_region(done: int, total: int, message: str = "") -> None:
+            frac = f0 + (f1 - f0) * (done / total if total else 0.0)
+            report(STAGE_LLM_ANALYZE, frac, message or STAGE_MESSAGES[STAGE_LLM_ANALYZE])
+
+        has_hook = hasattr(analyst, "progress_callback")
         try:
             if not analyst.is_available():
                 log.info("LLM kullanılamıyor (exe/model yok); yorum atlandı.")
                 return detection, None, False
             stage(STAGE_LLM_ANALYZE)
-            analyzed = analyst.analyze(registration, detection)
+            if has_hook:
+                analyst.progress_callback = on_region
+            analyzed = analyst.analyze(registration, work)
             stage(STAGE_LLM_SUMMARIZE)
             summary = analyst.summarize(registration, analyzed)
             return analyzed, summary, True
@@ -335,6 +378,45 @@ class Pipeline:
         except Exception:
             log.exception("LLM adımı başarısız; CV sonuçlarıyla devam ediliyor.")
             return detection, None, False
+        finally:
+            if has_hook:
+                analyst.progress_callback = None
+
+    def interpret(
+        self,
+        result: ComparisonResult,
+        progress: ProgressCallback | None = None,
+        cancel: threading.Event | None = None,
+    ) -> ComparisonResult:
+        """Var olan bir CV sonucunu ("Yorumla" düğmesi) hizalama/tespit tekrarlanmadan LLM ile yorumlar.
+
+        Yüklü CV modelleri önce bırakılır. LLM yoksa/başarısızsa sonuç `llm_used=False` ile aynen döner.
+        """
+        assert self.config is not None
+        report = progress or _noop_progress
+        if (result.detection is None or not result.detection.regions or not self.config.llm.enabled
+                or self.analyst_factory is None):
+            return result
+        with self._state_lock:
+            self._active_runs += 1
+        try:
+            def stage(name: str, message: str | None = None) -> None:
+                if cancel is not None and cancel.is_set():
+                    raise ComparisonCancelled()
+                report(name, _FRACTIONS_WITH_LLM[name], message or STAGE_MESSAGES[name])
+
+            t0 = time.perf_counter()
+            self.release_cv_models()
+            detection, summary, used = self._run_llm(result.registration, result.detection, stage, report)
+            report(STAGE_DONE, 1.0, STAGE_MESSAGES[STAGE_DONE])
+            return ComparisonResult(result.registration, detection, used,
+                                    result.elapsed_s + time.perf_counter() - t0, summary)
+        finally:
+            with self._state_lock:
+                self._active_runs -= 1
+                release_now = self._retired and self._active_runs == 0
+            if release_now:
+                self.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -349,18 +431,24 @@ _default_lock = threading.Lock()
 def build_default_pipeline(config: AppConfig | None = None) -> Pipeline:
     """Gerçek modüllerle pipeline kurar.
 
-    Modeller burada YÜKLENMEZ; her bileşen ilk kullanımda lazy yükler. LLM (llm-analyst) Faz 3'te
-    `analyst_factory` olarak bağlanacak; şimdilik yok.
+    Modeller burada YÜKLENMEZ; her bileşen ilk kullanımda lazy yükler. LLM analisti (ve llama-server)
+    yalnızca `use_llm=True` ile ilk yorum istendiğinde oluşturulur/başlatılır.
     """
     from core.detection import create_detector
     from core.registration import create_preprocessor, create_registrar
 
     config = config or load_config()
+
+    def analyst_factory() -> RegionAnalyst:
+        from core.llm import create_analyst   # llm modülü yalnızca ilk yorum isteğinde yüklenir
+
+        return create_analyst(config)
+
     return Pipeline(
         preprocessor=create_preprocessor(config),
         registrar=create_registrar(config),
         detector=create_detector(config),
-        analyst_factory=None,
+        analyst_factory=analyst_factory,
         config=config,
     )
 
@@ -420,9 +508,36 @@ def run_comparison(
     use_llm: bool,
     cancel: threading.Event | None = None,
     ignore_mask: np.ndarray | None = None,
+    on_cv_result: PartialResultCallback | None = None,
 ) -> ComparisonResult:
-    """UI'ın çağırdığı tek fonksiyon. Arka plan thread'inde çağrılmalıdır (UI thread'inde DEĞİL).
+    """UI'ın çağırdığı ana fonksiyon. Arka plan thread'inde çağrılmalıdır (UI thread'inde DEĞİL).
 
     Ayrıntılar için `Pipeline.run`.
     """
-    return get_default_pipeline().run(before, after, progress, use_llm, cancel, ignore_mask)
+    return get_default_pipeline().run(before, after, progress, use_llm, cancel, ignore_mask, on_cv_result)
+
+
+def interpret_comparison(
+    result: ComparisonResult,
+    progress: ProgressCallback,
+    cancel: threading.Event | None = None,
+) -> ComparisonResult:
+    """"Yorumla" düğmesi: var olan CV sonucunu yalnızca LLM ile yorumlar (arka plan thread'inde çağır)."""
+    return get_default_pipeline().interpret(result, progress, cancel)
+
+
+def llm_status() -> dict[str, object]:
+    """Durum çubuğu için LLM durumu: available / running / ngl / model. Sunucuyu BAŞLATMAZ."""
+    cfg = _default_config or load_config()
+    spec = cfg.llm.model_spec
+    files_ok = (cfg.paths.llama_server_exe.is_file() and spec.gguf_path(cfg.paths.models_dir).is_file()
+                and spec.mmproj_path(cfg.paths.models_dir).is_file())
+    status: dict[str, object] = {"model": spec.display_name, "available": bool(cfg.llm.enabled and files_ok),
+                                 "running": False, "ngl": None}
+    pipe = _default_pipeline
+    analyst = pipe._analyst if pipe is not None else None
+    if analyst is not None:
+        status["running"] = bool(getattr(analyst, "is_server_running", False))
+        info = getattr(analyst, "last_start_info", None)
+        status["ngl"] = getattr(info, "ngl", None) if info is not None else None
+    return status
