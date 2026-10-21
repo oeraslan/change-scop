@@ -57,6 +57,9 @@ from core.contracts import ImageSource
 
 DEFAULT_FOLDER_NAME = "Genel"
 DATE_FILTERS = ["Tüm tarihler", "Son 7 gün", "Son 30 gün", "Bu yıl"]
+HISTORY_SORTS: list[tuple[str, str]] = [
+    ("Yeni → eski", "newest"), ("Eski → yeni", "oldest"), ("Bölge sayısı", "regions"),
+]
 SOURCE_FILTERS: list[tuple[str, str | None]] = [
     ("Tüm kaynaklar", None), ("Drone", "drone"), ("İHA", "uav"), ("Uydu", "satellite"),
     ("Bilinmiyor", "unknown"),
@@ -74,16 +77,27 @@ def expand_paths(paths: list[Path]) -> list[Path]:
     return out
 
 
+METHOD_LABELS = {"ssim": "SSIM", "dinov2": "DINOv2", "ssim+dinov2": "SSIM + DINOv2"}
+
+
+def method_label(method: str) -> str:
+    """Fark yöntemi için okunur etiket (bilinmeyen değerler olduğu gibi)."""
+    return METHOD_LABELS.get(method, method)
+
+
 class HistoryRow(Surface):
-    """Geçmiş karşılaştırma satırı: önce/sonra küçük resimleri, tarihler, bölge sayısı, kalite."""
+    """Geçmiş karşılaştırma kartı: önce/sonra küçük resimleri, tarih çifti, klasör yolu, kalite, bölge sayısı,
+    maske ve yöntem rozetleri."""
 
     opened = Signal(object)
+    recompareRequested = Signal(object)
     deleteRequested = Signal(object)
+    revealRequested = Signal(object)
 
     def __init__(self, rec: ComparisonRecord, library: Library, parent: QWidget | None = None) -> None:
         super().__init__(parent, hoverable=True)
         self.rec = rec
-        self.setFixedHeight(88)
+        self.setFixedHeight(96)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         before = library.repo.get_image(rec.before_image_id)
         after = library.repo.get_image(rec.after_image_id)
@@ -93,28 +107,42 @@ class HistoryRow(Surface):
         for img in (before, after):
             thumb = QLabel()
             thumb.setFixedSize(96, 64)
-            if img is not None and img.thumb_path:
-                pix = QPixmap(str(library.thumb_path(img))).scaled(
+            thumb.setStyleSheet("border-radius:6px;")
+            tp = library.thumb_path(img) if img is not None else None
+            if tp is not None and tp.exists():
+                pix = QPixmap(str(tp)).scaled(
                     96, 64, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
                 thumb.setPixmap(pix.copy(0, 0, 96, 64))
-            thumb.setStyleSheet("border-radius:6px;")
             lay.addWidget(thumb)
             if img is before:
                 lay.addWidget(BodyLabel("→"))
         info = QVBoxLayout()
         info.setSpacing(2)
         chain = library.repo.folder_path(rec.folder_id) if rec.folder_id else []
-        title = " / ".join(f.name for f in chain) or "Karşılaştırma"
-        info.addWidget(StrongBodyLabel(title))
+        self.folder_text = " / ".join(f.name for f in chain) or "Karşılaştırma"
+        info.addWidget(StrongBodyLabel(self.folder_text))
         dates = f"{format_date(before.captured_at if before else None)}  →  {format_date(after.captured_at if after else None)}"
-        info.addWidget(BodyLabel(dates))
         stamp = rec.summary or ""
-        cap = dim_label(stamp[:110] + ("…" if len(stamp) > 110 else "") if stamp else
+        cap = dim_label(stamp[:90] + ("…" if len(stamp) > 90 else "") if stamp else
                         f"Hesaplandı: {format_date(rec.created_at)}")
+        cap.setMinimumWidth(0)
+        self.pills: list[Pill] = []
+        if rec.mask_hash:
+            self.pills.append(Pill("Maskeli", "#A78BFA"))
+        if rec.method:
+            self.pills.append(Pill(method_label(rec.method), "#94A3B8"))
+        self.pills.append(Pill(f"{rec.region_count} bölge", "#60A5FA"))
+        self.pills.append(Pill(QUALITY_LABELS.get(rec.quality, rec.quality), QUALITY_COLORS.get(rec.quality, "#94A3B8")))
+        line = QHBoxLayout()
+        line.setSpacing(6)
+        line.addWidget(BodyLabel(dates))
+        line.addSpacing(6)
+        for pill in self.pills:
+            line.addWidget(pill)
+        line.addStretch(1)
+        info.addLayout(line)
         info.addWidget(cap)
         lay.addLayout(info, 1)
-        lay.addWidget(Pill(f"{rec.region_count} bölge", "#60A5FA"))
-        lay.addWidget(Pill(QUALITY_LABELS.get(rec.quality, rec.quality), QUALITY_COLORS.get(rec.quality, "#94A3B8")))
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
@@ -124,6 +152,9 @@ class HistoryRow(Surface):
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         menu = RoundMenu(parent=self)
         menu.addAction(Action(FIF.VIEW, "Aç", triggered=lambda: self.opened.emit(self.rec)))
+        menu.addAction(Action(FIF.SYNC, "Yeniden karşılaştır", triggered=lambda: self.recompareRequested.emit(self.rec)))
+        menu.addAction(Action(FIF.FOLDER, "Klasörde göster", triggered=lambda: self.revealRequested.emit(self.rec)))
+        menu.addSeparator()
         menu.addAction(Action(FIF.DELETE, "Geçmişten sil", triggered=lambda: self.deleteRequested.emit(self.rec)))
         menu.exec(event.globalPos())
 
@@ -132,7 +163,8 @@ class LibraryView(QWidget):
     """Ana kütüphane sayfası."""
 
     compareRequested = Signal(object, object)       # (before ImageRecord, after ImageRecord)
-    comparisonOpened = Signal(object)               # ComparisonRecord
+    comparisonOpened = Signal(object)               # ComparisonRecord (kayıttan aç)
+    comparisonRecompareRequested = Signal(object)   # ComparisonRecord (önbelleği yok say)
     libraryChanged = Signal()
 
     def __init__(self, library: Library, parent: QWidget | None = None) -> None:
@@ -178,6 +210,11 @@ class LibraryView(QWidget):
         self.date_combo = ComboBox(self.content)
         self.date_combo.addItems(DATE_FILTERS)
         self.date_combo.setFixedWidth(150)
+        self.sort_combo = ComboBox(self.content)
+        self.sort_combo.addItems([t for t, _ in HISTORY_SORTS])
+        self.sort_combo.setFixedWidth(170)
+        self.sort_combo.setVisible(False)
+        self.sort_combo.currentIndexChanged.connect(lambda _: self.refresh_history())
         self.subfolder_check = CheckBox("Alt klasörler dahil", self.content)
         self.subfolder_check.setChecked(True)
         self.pivot = SegmentedWidget(self.content)
@@ -189,6 +226,7 @@ class LibraryView(QWidget):
         self._filter_timer.setSingleShot(True)
         self._filter_timer.setInterval(150)
         self._filter_timer.timeout.connect(self.refresh_gallery)
+        self._filter_timer.timeout.connect(self.refresh_history)
         self.search.textChanged.connect(lambda _: self._filter_timer.start())
         self.source_combo.currentIndexChanged.connect(lambda _: self.refresh_gallery())
         self.date_combo.currentIndexChanged.connect(lambda _: self.refresh_gallery())
@@ -209,7 +247,7 @@ class LibraryView(QWidget):
 
         tools = QHBoxLayout()
         tools.setSpacing(8)
-        for w in (self.search, self.source_combo, self.date_combo, self.subfolder_check):
+        for w in (self.search, self.source_combo, self.date_combo, self.sort_combo, self.subfolder_check):
             tools.addWidget(w)
         tools.addStretch(1)
         tools.addWidget(self.pivot)
@@ -251,10 +289,14 @@ class LibraryView(QWidget):
         self.history_empty = EmptyState(
             FIF.HISTORY, "Henüz karşılaştırma yok",
             "İki görüntü seçip Karşılaştır'a bastığında sonuçlar burada saklanır; tekrar açınca yeniden hesaplanmaz.")
+        self.history_filtered = EmptyState(
+            FIF.SEARCH, "Sonuç bulunamadı", "Aramayla eşleşen karşılaştırma yok.", "Aramayı temizle")
+        self.history_filtered.button.clicked.connect(self.search.clear)  # type: ignore[union-attr]
         self.tab_stack = QStackedWidget(self.content)
         self.history_page = QStackedWidget(self.content)
         self.history_page.addWidget(self.history_scroll)
         self.history_page.addWidget(self.history_empty)
+        self.history_page.addWidget(self.history_filtered)
         self.tab_stack.addWidget(self.gallery_stack)
         self.tab_stack.addWidget(self.history_page)
 
@@ -365,20 +407,50 @@ class LibraryView(QWidget):
             item = self.history_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        recs = self.library.repo.list_comparisons(self.current_folder_id())
+        search = self.search.text() if self.tab_stack.currentIndex() == 1 else ""
+        sort = HISTORY_SORTS[self.sort_combo.currentIndex()][1]
+        recs = self.library.repo.list_comparisons(self.current_folder_id(), search=search, sort=sort)
         for rec in recs:
             row = HistoryRow(rec, self.library, self.history_host)
             row.opened.connect(self.comparisonOpened)
-            row.deleteRequested.connect(self.delete_comparison)
+            row.recompareRequested.connect(self.comparisonRecompareRequested)
+            row.revealRequested.connect(self.reveal_comparison)
+            row.deleteRequested.connect(self.confirm_delete_comparison)
             self.history_layout.insertWidget(self.history_layout.count() - 1, row)
-        self.history_page.setCurrentWidget(self.history_scroll if recs else self.history_empty)
-        self.pivot.setItemText("history", f"Geçmiş karşılaştırmalar ({len(recs)})" if recs else "Geçmiş karşılaştırmalar")
+        if recs:
+            self.history_page.setCurrentWidget(self.history_scroll)
+        elif search.strip():
+            self.history_page.setCurrentWidget(self.history_filtered)
+        else:
+            self.history_page.setCurrentWidget(self.history_empty)
+        total = len(recs)
+        self.pivot.setItemText("history", f"Geçmiş karşılaştırmalar ({total})" if total else "Geçmiş karşılaştırmalar")
 
     def show_tab(self, key: str) -> None:
         """`images` veya `history` sekmesine geç."""
-        self.tab_stack.setCurrentIndex(0 if key == "images" else 1)
+        history = key == "history"
+        self.tab_stack.setCurrentIndex(1 if history else 0)
         self.pivot.setCurrentItem(key)
+        self.source_combo.setVisible(not history)
+        self.date_combo.setVisible(not history)
+        self.sort_combo.setVisible(history)
+        self.search.setPlaceholderText("Geçmişte ara…" if history else "Dosya adı ara…")
+        if history:
+            self.refresh_history()
         self._update_selection_ui()
+
+    def reveal_comparison(self, rec: ComparisonRecord) -> None:
+        """"Klasörde göster": görüntüler sekmesine geçer, klasörü seçer ve çiftin iki görüntüsünü işaretler."""
+        before = self.library.repo.get_image(rec.before_image_id)
+        if before is None:
+            return
+        self.search.clear()
+        self.show_tab("images")
+        self.tree.select_folder(before.folder_id)
+        self.refresh_gallery()
+        ids = [i for i in (rec.before_image_id, rec.after_image_id) if self.library.repo.get_image(i)]
+        known = {r.id for r in self.gallery_model.records()}
+        self.gallery.set_selection([i for i in ids if i in known])
 
     def _on_folder_selected(self, _fid) -> None:
         self.refresh_gallery()
@@ -436,8 +508,19 @@ class LibraryView(QWidget):
         self.libraryChanged.emit()
 
     def delete_comparison(self, rec: ComparisonRecord) -> None:
+        """Kaydı ve `result_dir` dosyalarını siler (onaysız çekirdek; onay `confirm_delete_comparison`'da)."""
         self.library.delete_comparison(rec.id)
         self.refresh_history()
+
+    def confirm_delete_comparison(self, rec: ComparisonRecord) -> None:
+        box = MessageBox(
+            "Karşılaştırma silinsin mi?",
+            "Kayıtlı sonuç (fark haritası, bölgeler, yapay zekâ yorumu) kalıcı olarak silinir. "
+            "Görüntülere dokunulmaz; tekrar karşılaştırabilirsin.", self.window())
+        box.yesButton.setText("Sil")
+        box.cancelButton.setText("Vazgeç")
+        if box.exec():
+            self.delete_comparison(rec)
 
     # ----- diyalog sarmalayıcıları (etkileşimli)
 
@@ -603,8 +686,11 @@ class LibraryView(QWidget):
         self.refresh_gallery()
 
     def confirm_delete_image(self, rec: ImageRecord) -> None:
+        n = self.library.repo.count_comparisons_for_image(rec.id)
+        extra = f" Bu görüntüyü kullanan {n} karşılaştırma kaydı da silinir." if n else ""
         box = MessageBox("Görüntü silinsin mi?",
-                         f"“{rec.original_name}” kütüphaneden silinecek (orijinal dosyaya dokunulmaz).", self.window())
+                         f"“{rec.original_name}” kütüphaneden silinecek (orijinal dosyaya dokunulmaz).{extra}",
+                         self.window())
         box.yesButton.setText("Sil")
         box.cancelButton.setText("Vazgeç")
         if box.exec():

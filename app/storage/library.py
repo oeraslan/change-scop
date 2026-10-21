@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 import shutil
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +33,15 @@ from core.contracts import (
 THUMB_SIZE = 320
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 RESULT_FORMAT_VERSION = 1
+MASK_MAX_SIDE = 2048        # saklanan maskenin uzun kenarı (daha büyük maskeler küçültülür)
+
+
+def mask_digest(mask: np.ndarray) -> str:
+    """Bool maskenin içerik özeti (şekil + bit dizisi); önbellek anahtarı olarak kullanılır."""
+    arr = np.asarray(mask).astype(bool)
+    h = hashlib.sha1(f"{arr.shape[0]}x{arr.shape[1]}".encode())
+    h.update(np.packbits(arr).tobytes())
+    return h.hexdigest()[:16]
 
 # Uydu görüntüleri büyük olabilir: Pillow sınırı 400 MP'ye yükseltilir ama korumayı tamamen kapatmaz
 # (core/registration/preprocess.py ile aynı sınır; süreç geneli ayar olduğu için None yapılmamalı).
@@ -108,6 +119,7 @@ class Library:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.repo = LibraryRepository(self.root / "library.sqlite3")
+        self._write_lock = threading.Lock()     # aynı sonuç klasörüne eşzamanlı yazımı sıralar
 
     def close(self) -> None:
         """Veritabanını kapatır."""
@@ -202,33 +214,101 @@ class Library:
     # -- karşılaştırma sonuçları --------------------------------------------
 
     def find_comparison(self, before: ImageRecord, after: ImageRecord) -> ComparisonRecord | None:
-        """Aynı çift için kaydedilmiş sonuç var mı?"""
-        rec = self.repo.find_comparison(before.id, after.id)
+        """Aynı çift VE aynı "önce" maskesi için kaydedilmiş sonuç var mı?
+
+        Önbellek anahtarı = (önce, sonra, önce görüntüsünün güncel maske özeti). `before` bayat bir
+        kayıt olabileceğinden maske özeti veritabanından yeniden okunur; maske değiştiyse eski sonuç
+        kullanılmaz.
+        """
+        rec = self.repo.find_comparison(before.id, after.id, self.current_mask_hash(before))
         if rec is not None and not (self.abs_path(rec.result_dir) / "meta.json").is_file():
             return None
         return rec
 
+    def current_mask_hash(self, image: ImageRecord) -> str:
+        """Görüntünün veritabanındaki güncel maske özeti ("" = maske yok)."""
+        fresh = self.repo.get_image(image.id)
+        return fresh.mask_hash if fresh is not None else image.mask_hash
+
     def save_comparison(
-        self, before: ImageRecord, after: ImageRecord, result: ComparisonResult
+        self, before: ImageRecord, after: ImageRecord, result: ComparisonResult,
+        mask_hash: str | None = None,
     ) -> ComparisonRecord:
         """Karşılaştırma sonucunu `results/<id>/` altına yazar ve kaydı ekler/günceller.
 
         change_map, bölgeler (maskeleriyle), AI yorumları, hizalanmış görüntü ve özet saklanır.
+        Kayıt tek transaction içinde eklenir/güncellenir (eşzamanlı kayıtlar çift satır üretmez).
+
+        Args:
+            mask_hash: Hesaplamada kullanılan "önce" maskesinin özeti; None → görüntünün güncel maskesi.
         """
-        existing = self.repo.find_comparison(before.id, after.id)
-        folder_id: int | None = before.folder_id
+        if mask_hash is None:
+            mask_hash = self.current_mask_hash(before)
         quality = result.registration.quality.value
         n_regions = len(result.detection.regions) if result.detection else 0
-        if existing is None:
-            rel_dir = f"results/{uuid.uuid4().hex[:12]}"
-            rec = self.repo.add_comparison(
-                folder_id, before.id, after.id, rel_dir, quality, n_regions, result.summary
-            )
-        else:
-            rec, rel_dir = existing, existing.result_dir
-            self.repo.update_comparison(rec.id, quality, n_regions, result.summary)
-        _write_result(self.abs_path(rel_dir), result)
+        method = result.detection.method if result.detection else ""
+        rec, _created = self.repo.upsert_comparison(
+            before.folder_id, before.id, after.id, f"results/{uuid.uuid4().hex[:12]}", quality, n_regions,
+            result.summary, mask_hash, method,
+        )
+        with self._write_lock:
+            _write_result(self.abs_path(rec.result_dir), result)
         return self.repo.get_comparison(rec.id)  # type: ignore[return-value]
+
+    # -- yok sayma maskesi ---------------------------------------------------
+
+    def save_mask(self, image: ImageRecord, mask: np.ndarray) -> ImageRecord:
+        """Görüntüye bağlı yok sayma maskesini tek kanallı PNG olarak saklar (255 = yok say).
+
+        Maske görüntünün EXIF yönü düzeltilmiş halinin herhangi bir ölçeğinde olabilir; uzun kenarı
+        `MASK_MAX_SIDE` px'i aşarsa en yakın komşu ile küçültülür. Hiç işaretli piksel yoksa maske
+        kaldırılır (`clear_mask`). Ağır disk işi: UI thread'inde çağrılmamalıdır.
+
+        Returns:
+            Güncellenmiş görüntü kaydı (`mask_path` / `mask_hash`).
+        """
+        arr = np.asarray(mask).astype(bool)
+        if arr.ndim != 2 or arr.size == 0:
+            raise ValueError(f"Maske 2 boyutlu olmalı, gelen şekil: {arr.shape}")
+        if not arr.any():
+            return self.clear_mask(image)
+        h, w = arr.shape
+        if max(h, w) > MASK_MAX_SIDE:
+            k = MASK_MAX_SIDE / max(h, w)
+            arr = np.asarray(Image.fromarray(arr.astype(np.uint8) * 255).resize(
+                (max(1, round(w * k)), max(1, round(h * k))), Image.Resampling.NEAREST)) > 127
+        digest = mask_digest(arr)
+        rel = f"masks/{image.id}_{digest}.png"
+        target = self.abs_path(rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(f".{uuid.uuid4().hex[:6]}.tmp")
+        Image.fromarray(arr.astype(np.uint8) * 255, mode="L").save(tmp, "PNG", optimize=False)
+        os.replace(tmp, target)
+        old = self.repo.set_image_mask(image.id, rel, digest)
+        if old and old != rel:
+            self._remove_paths([old])
+        return self.repo.get_image(image.id)  # type: ignore[return-value]
+
+    def load_mask(self, image: ImageRecord) -> np.ndarray | None:
+        """Görüntünün kayıtlı yok sayma maskesi (HxW bool, True = yok say); yoksa None.
+
+        Güncel maske yolu veritabanından okunur. Dosya bozuk/eksikse None döner.
+        """
+        fresh = self.repo.get_image(image.id) or image
+        if not fresh.mask_path:
+            return None
+        try:
+            with Image.open(self.abs_path(fresh.mask_path)) as img:
+                return np.array(img.convert("L")) > 127
+        except (OSError, ValueError):
+            return None
+
+    def clear_mask(self, image: ImageRecord) -> ImageRecord:
+        """Görüntünün maskesini kaldırır (dosya dahil)."""
+        old = self.repo.set_image_mask(image.id, None, "")
+        if old:
+            self._remove_paths([old])
+        return self.repo.get_image(image.id)  # type: ignore[return-value]
 
     def load_comparison(self, rec: ComparisonRecord) -> ComparisonResult:
         """Kaydedilmiş sonucu yeniden hesaplamadan okur."""
@@ -297,7 +377,7 @@ def _write_result(directory: Path, result: ComparisonResult) -> None:
         "elapsed_s": result.elapsed_s,
         "summary": result.summary,
     }
-    tmp = directory / "meta.json.tmp"
+    tmp = directory / f"meta.{uuid.uuid4().hex[:8]}.tmp"
     tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(tmp, directory / "meta.json")  # meta.json en son: yarım yazılmış sonuç "yok" sayılır
 
@@ -345,5 +425,5 @@ def _read_result(directory: Path, before_in: ImageInput, after_in: ImageInput | 
 
 __all__ = [
     "IMAGE_EXTENSIONS", "Library", "default_library_dir", "file_date", "is_image_file",
-    "make_thumbnail", "read_exif_date", "Folder",
+    "make_thumbnail", "mask_digest", "read_exif_date", "Folder", "MASK_MAX_SIDE",
 ]

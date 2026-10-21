@@ -72,6 +72,7 @@ class ComparisonWorker(QThread):
     def _try_cached(self):
         if self._force or not self._use_cache:
             return None
+        # Önbellek anahtarı maske özetini içerir: maske değiştiyse eski sonuç bulunmaz.
         cached = self._library.find_comparison(self._before_rec, self._after_rec)
         if cached is None:
             return None
@@ -93,17 +94,22 @@ class ComparisonWorker(QThread):
             if self._load_previews:
                 self.previews.emit(load_preview(self._library.image_path(self._before_rec)),
                                    load_preview(self._library.image_path(self._after_rec)))
+            # "Önce" görüntüsünün güncel maskesi (PNG okuma burada, worker thread'inde).
+            fresh = self._library.repo.get_image(self._before_rec.id) or self._before_rec
+            mask = self._library.load_mask(fresh)
+            mask_hash = fresh.mask_hash if mask is not None else ""
             result: ComparisonResult = core_pipeline.run_comparison(
                 self._library.to_image_input(self._before_rec),
                 self._library.to_image_input(self._after_rec),
-                self._report, self._use_llm, cancel=self.cancel_event,
+                self._report, self._use_llm, cancel=self.cancel_event, ignore_mask=mask,
             )
             if self.cancel_event.is_set():
                 self.cancelled.emit()
                 return
             record, save_error = None, ""
             try:
-                record = self._library.save_comparison(self._before_rec, self._after_rec, result)
+                record = self._library.save_comparison(
+                    self._before_rec, self._after_rec, result, mask_hash=mask_hash)
             except Exception as exc:  # noqa: BLE001
                 log.exception("Sonuç kaydedilemedi")
                 save_error = str(exc)
@@ -115,6 +121,32 @@ class ComparisonWorker(QThread):
             self.cancelled.emit()
         except Exception as exc:  # noqa: BLE001 - kullanıcıya gösterilir
             log.exception("Karşılaştırma başarısız")
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class MaskWorker(QThread):
+    """Maske PNG okuma/yazma işini UI dışında yapar.
+
+    `mode="load"`: loaded(mask_or_None, record) · `mode="save"`: saved(record) · hata: failed(msg)
+    """
+
+    loaded = Signal(object, object)
+    saved = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, library, image_rec, mode: str, mask=None, parent=None) -> None:
+        super().__init__(parent)
+        self._library, self._rec, self._mode, self._mask = library, image_rec, mode, mask
+
+    def run(self) -> None:
+        try:
+            if self._mode == "load":
+                fresh = self._library.repo.get_image(self._rec.id) or self._rec
+                self.loaded.emit(self._library.load_mask(fresh), fresh)
+            else:
+                self.saved.emit(self._library.save_mask(self._rec, self._mask))
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Maske işlemi başarısız")
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 

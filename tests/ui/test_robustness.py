@@ -147,7 +147,7 @@ def test_settings_change_calls_configure_with_new_config(window, qtbot, monkeypa
         w.text() for w in sv.findChildren(type(sv.sens_label)) if hasattr(w, "text"))
 
 
-def test_configure_is_deferred_while_comparison_runs(window, populated, qtbot, monkeypatch) -> None:
+def test_configure_does_not_wait_for_running_comparison(window, populated, qtbot, monkeypatch) -> None:
     _, _, recs = populated
     calls = _spy_configure(monkeypatch)
     blocking = BlockingRegistrar()
@@ -157,11 +157,10 @@ def test_configure_is_deferred_while_comparison_runs(window, populated, qtbot, m
     window.open_compare(recs[0], recs[1])
     qtbot.waitUntil(blocking.entered.is_set, timeout=10000)
     window.settings_view.tile_combo.setCurrentIndex(1)
-    qtbot.wait(700)
-    assert calls == []                                 # çalışırken çağrılmaz
-    blocking.gate.set()
-    qtbot.waitUntil(lambda: len(calls) == 1, timeout=15000)
+    qtbot.waitUntil(lambda: len(calls) == 1, timeout=3000)   # pipeline artık koşuyu beklemez
     assert calls[0].registration.tile_size_px == 768
+    blocking.gate.set()
+    _wait_idle(qtbot, cv)
 
 
 def test_main_configures_default_pipeline(tmp_path: Path, qtbot, monkeypatch) -> None:

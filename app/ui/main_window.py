@@ -85,6 +85,9 @@ class MainWindow(FluentWindow):
         # Bağlantılar
         self.library_view.compareRequested.connect(self.open_compare)
         self.library_view.comparisonOpened.connect(self.open_saved_comparison)
+        self.library_view.comparisonRecompareRequested.connect(
+            lambda rec: self.open_saved_comparison(rec, force=True))
+        self.compare_view.maskSaved.connect(lambda _rec: self.library_view.refresh_history())
         self.library_view.libraryChanged.connect(self._update_library_info)
         self.compare_view.backRequested.connect(lambda: self.switchTo(self.library_view))
         self.compare_view.resultSaved.connect(lambda _id: self.library_view.refresh_history())
@@ -111,10 +114,11 @@ class MainWindow(FluentWindow):
         self.switchTo(self.compare_view)
         self.compare_view.open_pair(before, after)
 
-    def open_saved_comparison(self, rec) -> None:
-        """Geçmişten kaydedilmiş bir karşılaştırmayı açar (yeniden hesaplamaz)."""
+    def open_saved_comparison(self, rec, force: bool = False) -> None:
+        """Geçmişten kaydedilmiş bir karşılaştırmayı açar (yeniden hesaplamaz; `force=True` hesaplar)."""
+        self.compare_view.use_llm = self.config.llm.enabled
         self.switchTo(self.compare_view)
-        self.compare_view.open_comparison(rec)
+        self.compare_view.open_comparison(rec, force=force)
 
     # ------------------------------------------------------------------- ayarlar
 
@@ -165,11 +169,8 @@ class MainWindow(FluentWindow):
             self._reconfigure_timer.start()
 
     def _apply_pipeline_config(self) -> None:
-        """`configure_default_pipeline`'ı çağırır; karşılaştırma sürüyorsa worker'lar bitene kadar ertelenir."""
-        if not self._reconfigure_enabled:
-            return
-        if self.compare_view.has_running_workers():
-            self._reconfigure_pending = True
+        """`configure_default_pipeline`'ı çağırır. Çalışan koşuyu beklemez: eski pipeline koşu bitince bırakılır."""
+        if not self._reconfigure_enabled or self._closing:
             return
         self._reconfigure_pending = False
         core_pipeline.configure_default_pipeline(copy.deepcopy(self.config))

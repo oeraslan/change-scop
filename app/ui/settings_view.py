@@ -23,6 +23,8 @@ from core.config import AppConfig, save_config
 
 THEME_TEXTS = ["Koyu", "Açık", "Sistem"]
 TILE_SIZES = [512, 768, 1024, 1536, 2048]
+METHODS = ["ssim", "dinov2", "ssim+dinov2"]
+METHOD_TEXTS = ["SSIM", "DINOv2", "Birleşik (SSIM + DINOv2)"]
 DEVICES = ["auto", "cuda", "cpu"]
 DEVICE_TEXTS = ["Otomatik", "GPU (CUDA)", "CPU"]
 
@@ -47,8 +49,8 @@ class SettingsView(QWidget):
         self._config_path, self._prefs_path = config_path, prefs_path
 
         title = TitleLabel("Ayarlar", self)
-        note = BodyLabel("Değişiklikler anında kaydedilir. Hassasiyet, tile boyutu, cihaz ve yapay zekâ "
-                         "ayarları bir sonraki karşılaştırmada otomatik uygulanır (çalışan işlem bitince).", self)
+        note = BodyLabel("Değişiklikler anında kaydedilir. Hassasiyet, fark yöntemi, tile boyutu, cihaz ve yapay "
+                         "zekâ ayarları bir sonraki karşılaştırmada uygulanır (çalışan işlem eski ayarla biter).", self)
         note.setTextColor("#6b7280", "#9aa3b2")
 
         # Tema
@@ -87,6 +89,16 @@ class SettingsView(QWidget):
                                "Yüksek değer daha küçük farkları da işaretler (daha fazla yanlış alarm olabilir).",
                                self.sens_slider, self.sens_label)
 
+        # Fark yöntemi
+        self.method_combo = ComboBox(self)
+        self.method_combo.addItems(METHOD_TEXTS)
+        method = config.detection.method
+        self.method_combo.setCurrentIndex(METHODS.index(method) if method in METHODS else 0)
+        self.method_combo.setFixedWidth(200)
+        self.method_combo.currentIndexChanged.connect(self._on_method)
+        self.method_card = self._card(FIF.DEVELOPER_TOOLS, "Fark yöntemi", self.method_description(),
+                                      self.method_combo)
+
         # Tile
         self.tile_combo = ComboBox(self)
         self.tile_combo.addItems([f"{n} px" for n in TILE_SIZES])
@@ -116,7 +128,7 @@ class SettingsView(QWidget):
         lay.addWidget(title)
         lay.addWidget(note)
         lay.addSpacing(16)
-        for card in (theme_card, self.library_card, llm_card, sens_card, tile_card, device_card):
+        for card in (theme_card, self.library_card, llm_card, sens_card, self.method_card, tile_card, device_card):
             lay.addWidget(card)
         lay.addStretch(1)
 
@@ -168,6 +180,29 @@ class SettingsView(QWidget):
     def _on_sensitivity(self, value: int) -> None:
         self.sens_label.setText(f"%{value}")
         self.config.detection.sensitivity = value / 100.0
+        self._save()
+        self.pipelineSettingsChanged.emit()
+
+    def dinov2_available(self) -> bool:
+        """DINOv2 model ağırlıkları `models/dinov2` altında var mı?"""
+        try:
+            return self.config.paths.dinov2_weights.exists()
+        except OSError:
+            return False
+
+    def method_description(self) -> str:
+        """Seçili yönteme göre açıklama (DINOv2 modeli yoksa uyarı içerir)."""
+        text = ("SSIM: hızlı, yapısal fark. DINOv2: anlamsal öznitelik farkı (ışık/gölgeye daha dayanıklı). "
+                "Birleşik: ikisinin ağırlıklı toplamı.")
+        if not self.dinov2_available() and self.config.detection.method != "ssim":
+            text += " Uyarı: models/dinov2 bulunamadı; DINOv2 yerine SSIM kullanılır."
+        elif not self.dinov2_available():
+            text += " Not: DINOv2 modeli (models/dinov2) kurulu değil; seçilirse SSIM'e düşülür."
+        return text
+
+    def _on_method(self, index: int) -> None:
+        self.config.detection.method = METHODS[index]  # type: ignore[assignment]
+        self.method_card.contentLabel.setText(self.method_description())
         self._save()
         self.pipelineSettingsChanged.emit()
 

@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -33,10 +34,11 @@ from qfluentwidgets import FluentIcon as FIF
 from app.storage import ComparisonRecord, ImageRecord, Library
 from app.ui.ai_panel import AiPanel
 from app.ui.exporter import export_comparison
+from app.ui.mask_editor import TOOL_BRUSH, MaskEditor, MaskToolbar
 from app.ui.qt_utils import heatmap_to_qimage, rgb_to_qimage
 from app.ui.sync_graphics_view import RegionSpec, SyncGraphicsView, SyncGroup
 from app.ui.theme import ACCENT, EmptyState, Pill, Surface
-from app.ui.workers import ComparisonWorker, load_preview  # noqa: F401 - load_preview geriye uyumluluk
+from app.ui.workers import ComparisonWorker, MaskWorker, load_preview  # noqa: F401 - load_preview geriye uyumluluk
 from core.contracts import AlignmentQuality, ChangeVerdict, ComparisonResult
 
 _RETIRED: set[ComparisonWorker] = set()   # iptal edilmiş ama henüz bitmemiş worker'lar (referans tutulur)
@@ -75,7 +77,8 @@ class CompareView(QWidget):
 
     backRequested = Signal()
     resultSaved = Signal(int)       # kaydedilen karşılaştırma id'si (geçmiş listesini yenilemek için)
-    workersIdle = Signal()          # hiçbir arka plan işi kalmadı (ertelenen ayar değişiklikleri için)
+    maskSaved = Signal(object)      # kaydedilen maskeli ImageRecord
+    workersIdle = Signal()        # hiçbir arka plan işi kalmadı (ertelenen ayar değişiklikleri için)
 
     def __init__(self, library: Library | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -91,6 +94,9 @@ class CompareView(QWidget):
         self._infobars: list[InfoBar] = []
         self._model_name = "Gemma 4 12B"
         self._sized = False
+        self._mask_workers: set[MaskWorker] = set()
+        self._mask_saving = False
+        self.mask_editor = MaskEditor(self)
 
         self.group = SyncGroup(self)
         self.before_pane = _Pane(self.group, "ÖNCE", self)
@@ -121,6 +127,14 @@ class CompareView(QWidget):
         self.hide_false_check = CheckBox("Yanlış alarmları gizle", self)
         self.hide_false_check.toggled.connect(self._on_hide_false_toggled)
 
+        self.mask_button = PushButton(FIF.BRUSH, "Yok sayma maskesi", self)
+        self.mask_button.setToolTip("Karşılaştırmaya katılmayacak alanları boya (bulut, su, park alanı…)")
+        self.mask_button.clicked.connect(self.toggle_mask_mode)
+        self.mask_button.setEnabled(False)
+        self.mask_badge = Pill("Maske aktif", "#A78BFA", self)
+        self.mask_badge.setToolTip("Bu 'önce' görüntüsü için kayıtlı bir yok sayma maskesi uygulandı")
+        self.mask_badge.setVisible(False)
+
         self.fit_button = ToolButton(FIF.FIT_PAGE, self)
         self.fit_button.setToolTip("Görüntüleri sığdır (çift tık)")
         self.fit_button.clicked.connect(self.group.fit_all)
@@ -137,7 +151,10 @@ class CompareView(QWidget):
         titles.addWidget(self.title_label)
         titles.addWidget(self.dates_label)
         head.addLayout(titles)
+        head.addWidget(self.mask_badge)
         head.addStretch(1)
+        head.addWidget(self.mask_button)
+        head.addSpacing(8)
         head.addWidget(self.diff_switch)
         head.addSpacing(8)
         head.addWidget(self.heat_switch)
@@ -182,6 +199,25 @@ class CompareView(QWidget):
         self.image_splitter.addWidget(self.after_pane)
         self.image_splitter.setSizes([1, 1])
 
+        # --- Maske düzenleme ---
+        self.mask_toolbar = MaskToolbar(self)
+        self.mask_toolbar.setVisible(False)
+        for view in (self.before_view, self.after_view):
+            view.attach_mask_editor(self.mask_editor)
+        tb = self.mask_toolbar
+        tb.toolChanged.connect(self._on_mask_tool)
+        tb.sizeChanged.connect(self._on_mask_size)
+        tb.undoRequested.connect(self.mask_undo)
+        tb.redoRequested.connect(self.mask_redo)
+        tb.clearRequested.connect(self.mask_editor.clear)
+        tb.cancelRequested.connect(self.cancel_mask_mode)
+        tb.saveRequested.connect(self.save_mask_and_recompare)
+        self.mask_editor.historyChanged.connect(self._refresh_mask_toolbar)
+        for seq, slot in (("Ctrl+Z", self.mask_undo), ("Ctrl+Y", self.mask_redo), ("Ctrl+Shift+Z", self.mask_redo)):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(slot)
+
         self.ai_panel = AiPanel(self)
         self.ai_panel.set_model_name(self._model_name)
         self.ai_panel.regionActivated.connect(self._on_card_clicked)
@@ -205,6 +241,7 @@ class CompareView(QWidget):
         root.addLayout(head)
         root.addWidget(self.progress_host)
         root.addWidget(self.infobar_host)
+        root.addWidget(self.mask_toolbar)
         root.addWidget(self.main_splitter, 1)
 
         self.empty_state = EmptyState(
@@ -254,16 +291,18 @@ class CompareView(QWidget):
 
     def has_running_workers(self) -> bool:
         """İptal edilmiş olanlar dahil arka planda çalışan herhangi bir iş var mı?"""
-        return self.is_busy() or any(w.isRunning() for w in _RETIRED)
+        return (self.is_busy() or any(w.isRunning() for w in _RETIRED)
+                or any(w.isRunning() for w in self._mask_workers))
 
     def shutdown(self, timeout_ms: int = 10000) -> None:
         """Pencere kapanırken: tüm işleri iptal eder, olay döngüsünü işleterek (UI donmadan) bitmelerini bekler."""
         import time
 
         self._deferred_start = None
-        workers = [w for w in [self._worker, *_RETIRED] if w is not None]
+        workers = [w for w in [self._worker, *_RETIRED, *self._mask_workers] if w is not None]
         for w in workers:
-            w.cancel()
+            if hasattr(w, "cancel"):
+                w.cancel()
         deadline = time.monotonic() + timeout_ms / 1000
         while any(w.isRunning() for w in workers) and time.monotonic() < deadline:
             QApplication.processEvents()
@@ -281,8 +320,11 @@ class CompareView(QWidget):
         """
         assert self.library is not None
         self._abort_worker()
+        self._leave_mask_mode()
         self._outer.setCurrentWidget(self.body)
         self._before_rec, self._after_rec = before, after
+        self.mask_button.setEnabled(False)
+        self.mask_badge.setVisible(bool(before.mask_hash))
         self._comparison = None
         self._result = None
         self._set_header(before, after)
@@ -295,15 +337,16 @@ class CompareView(QWidget):
         # Önbellek araması/okuması, önizleme yükleme, pipeline ve kayıt: hepsi worker thread'inde.
         self._start_worker(self.use_llm if use_llm is None else use_llm, loading_ai=False, force=force)
 
-    def open_comparison(self, rec: ComparisonRecord) -> None:
-        """Geçmişten kaydedilmiş karşılaştırmayı aç."""
+    def open_comparison(self, rec: ComparisonRecord, force: bool = False) -> None:
+        """Geçmişten kaydedilmiş karşılaştırmayı aç (`force=True`: önbelleği yok say, yeniden hesapla)."""
         assert self.library is not None
         before = self.library.repo.get_image(rec.before_image_id)
         after = self.library.repo.get_image(rec.after_image_id)
         if before is None or after is None:
+            self._outer.setCurrentWidget(self.body)
             self._info("error", "Görüntü bulunamadı", "Bu karşılaştırmanın görüntülerinden biri silinmiş.")
             return
-        self.open_pair(before, after)
+        self.open_pair(before, after, force=force)
 
     def show_result(self, result: ComparisonResult, title: str | None = None, dates: str | None = None) -> None:
         """Hazır bir sonucu gösterir (kayıttan açma, demo ve testler için de kullanılır)."""
@@ -340,6 +383,12 @@ class CompareView(QWidget):
             heat = heatmap_to_qimage(result.detection.change_map)  # type: ignore[union-attr]
             self.before_view.set_heatmap(heat)
             self.after_view.set_heatmap(heat)
+        if result.detection is not None:
+            self._detection_notices(result.detection)
+        self.mask_button.setEnabled(self._before_rec is not None and self.library is not None
+                                    and not self._mask_saving)
+        self.mask_editor.set_canvas(reg.before.pixels.shape[1], reg.before.pixels.shape[0])
+        self._leave_mask_mode()
         self.diff_switch.setEnabled(not failed)
         self.heat_switch.setEnabled(not failed)
         self.hide_false_check.setEnabled(not failed)
@@ -370,6 +419,126 @@ class CompareView(QWidget):
         self.dates_label.setText(f"{format_date(before.captured_at)}  →  {format_date(after.captured_at)}")
         self.before_pane.set_label(f"ÖNCE · {format_date(before.captured_at)}")
         self.after_pane.set_label(f"SONRA · {format_date(after.captured_at)}")
+
+    def _detection_notices(self, detection) -> None:
+        """Tespit sonucundaki `unreliable` / yöntem düşüşü (fallback) bilgilerini InfoBar olarak gösterir."""
+        params = detection.params or {}
+        if params.get("unreliable"):
+            reason = params.get("unreliable_reason") or "bilinmeyen neden"
+            self._info("warning", "Güvenilirlik uyarısı",
+                       f"Sonuç güvenilmez olabilir: {reason}", key="unreliable")
+        fallback = params.get("fallback_reason")
+        if fallback:
+            self._info("info", "Fark yöntemi değiştirildi",
+                       f"İstenen yöntem kullanılamadı ({detection.method or 'ssim'} ile devam edildi): {fallback}",
+                       key="fallback")
+
+    # ------------------------------------------------------------- yok sayma maskesi
+
+    def mask_mode_active(self) -> bool:
+        """Maske düzenleme modu açık mı?"""
+        return self.mask_toolbar.isVisibleTo(self)
+
+    def toggle_mask_mode(self) -> None:
+        """Maske modunu aç/kapat (kapatma = değişiklikleri atma)."""
+        if self.mask_mode_active():
+            self.cancel_mask_mode()
+        else:
+            self.enter_mask_mode()
+
+    def enter_mask_mode(self) -> None:
+        """Maske moduna girer: mevcut maske worker'da okunur, sonra düzenlemeye açılır."""
+        if self._result is None or self._before_rec is None or self.library is None or self.is_busy():
+            return
+        if self.mask_mode_active():
+            return
+        reg = self._result.registration
+        self.mask_editor.set_canvas(reg.before.pixels.shape[1], reg.before.pixels.shape[0])
+        longest = max(reg.before.pixels.shape[:2])
+        self.mask_toolbar.set_brush_range(max(64, longest // 4), max(8, longest // 40))
+        self.mask_editor.brush_px = float(self.mask_toolbar.size_slider.value())
+        self.mask_editor.tool = TOOL_BRUSH
+        self.mask_toolbar.tools.setCurrentItem(TOOL_BRUSH)
+        self.mask_toolbar.setVisible(True)
+        self.mask_button.setText("Maske modundan çık")
+        for view in (self.before_view, self.after_view):
+            view.set_mask_mode(True)
+        self._refresh_mask_toolbar()
+        w = MaskWorker(self.library, self._before_rec, "load", parent=None)
+        w.loaded.connect(self._on_mask_loaded)
+        self._track_mask_worker(w)
+
+    def _on_mask_loaded(self, mask, record) -> None:
+        if not self.mask_mode_active() or self._before_rec is None or record.id != self._before_rec.id:
+            return
+        self.mask_editor.load(mask)
+        self._refresh_mask_toolbar()
+
+    def _track_mask_worker(self, w: MaskWorker) -> None:
+        self._mask_workers.add(w)
+        w.finished.connect(lambda w=w: (self._mask_workers.discard(w), w.deleteLater()))
+        w.start()
+
+    def _leave_mask_mode(self) -> None:
+        self.mask_toolbar.setVisible(False)
+        self.mask_button.setText("Yok sayma maskesi")
+        for view in (self.before_view, self.after_view):
+            view.set_mask_mode(False)
+
+    def cancel_mask_mode(self) -> None:
+        """Değişiklikleri atıp maske modundan çıkar."""
+        if self._mask_saving:
+            return
+        self._leave_mask_mode()
+
+    def _on_mask_tool(self, tool: str) -> None:
+        self.mask_editor.tool = tool
+        for view in (self.before_view, self.after_view):
+            view.refresh_mask_tool()
+
+    def _on_mask_size(self, value: int) -> None:
+        self.mask_editor.brush_px = float(value)
+
+    def mask_undo(self) -> None:
+        if self.mask_mode_active():
+            self.mask_editor.undo()
+
+    def mask_redo(self) -> None:
+        if self.mask_mode_active():
+            self.mask_editor.redo()
+
+    def _refresh_mask_toolbar(self) -> None:
+        ed = self.mask_editor
+        self.mask_toolbar.update_state(ed.can_undo(), ed.can_redo(), ed.has_content(), ed.coverage())
+
+    def save_mask_and_recompare(self) -> None:
+        """Maskeyi (worker'da) kaydeder, sonra aynı çifti maskeyle yeniden karşılaştırır."""
+        if not self.mask_mode_active() or self._mask_saving or self._before_rec is None or self.library is None:
+            return
+        if not self.mask_editor.is_modified():
+            self._leave_mask_mode()          # değişiklik yok: yeniden hesaplamaya gerek yok
+            return
+        self._mask_saving = True
+        self.mask_toolbar.save_button.setEnabled(False)
+        w = MaskWorker(self.library, self._before_rec, "save", self.mask_editor.mask_bool())
+        w.saved.connect(self._on_mask_saved)
+        w.failed.connect(self._on_mask_failed)
+        self._track_mask_worker(w)
+
+    def _on_mask_saved(self, record) -> None:
+        self._mask_saving = False
+        self.mask_toolbar.save_button.setEnabled(True)
+        if self._before_rec is None or self._after_rec is None:
+            return
+        self.mask_editor.mark_saved()
+        self._leave_mask_mode()
+        self.maskSaved.emit(record)
+        self.open_pair(record, self._after_rec, force=False)   # maske özeti değişti: önbellek bulunmaz, yeniden hesaplanır
+
+    def _on_mask_failed(self, message: str) -> None:
+        self._mask_saving = False
+        self.mask_toolbar.save_button.setEnabled(True)
+        self._info("error", "Maske kaydedilemedi", message, key="mask-error")
 
     # ---------------------------------------------------------------- işlem
 

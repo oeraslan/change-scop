@@ -30,6 +30,8 @@ class ImageRecord:
     height: int
     thumb_path: str | None
     created_at: str
+    mask_path: str | None = None    # yok sayma maskesi (tek kanallı PNG, 255 = yok say); kütüphane köküne göre
+    mask_hash: str = ""             # maske içeriğinin özeti ("" = maske yok); önbellek anahtarının parçası
 
 
 @dataclass(frozen=True)
@@ -45,3 +47,5 @@ class ComparisonRecord:
     region_count: int
     summary: str | None
     created_at: str
+    mask_hash: str = ""             # hesaplamada kullanılan maskenin özeti ("" = maskesiz)
+    method: str = ""                # kullanılan fark yöntemi (ssim / dinov2 / ssim+dinov2 ...)

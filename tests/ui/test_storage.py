@@ -36,11 +36,11 @@ def _png(path: Path, color=(120, 160, 90), size=(640, 480)) -> Path:
 
 def test_schema_version_and_reopen(tmp_path: Path) -> None:
     first = Library(tmp_path / "lib")
-    assert first.repo.schema_version() == 1
+    assert first.repo.schema_version() == 2
     folder = first.repo.create_folder("A")
     first.close()
     second = Library(tmp_path / "lib")  # migration tekrar çalışmaz, veri kalır
-    assert second.repo.schema_version() == 1
+    assert second.repo.schema_version() == 2
     assert [f.name for f in second.repo.list_folders()] == ["A"]
     assert second.repo.get_folder(folder.id) is not None
     second.close()
