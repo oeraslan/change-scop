@@ -5,6 +5,7 @@ from __future__ import annotations
 import cv2
 import pytest
 
+from core.config import AppConfig
 from core.contracts import AlignmentQuality, ImageInput
 from core.pipeline import build_default_pipeline
 from scripts.make_synthetic_pair import make_pair
@@ -16,7 +17,7 @@ def test_default_pipeline_finds_added_objects(tmp_path):
     cv2.imwrite(str(before), cv2.cvtColor(pair.before, cv2.COLOR_RGB2BGR))
     cv2.imwrite(str(after), cv2.cvtColor(pair.after, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 100])
 
-    pipe = build_default_pipeline()
+    pipe = build_default_pipeline(AppConfig())   # kullanıcının config.json'u testi etkilemesin
     stages: list[str] = []
     result = pipe.run(ImageInput(before), ImageInput(after), lambda s, f, m="": stages.append(s),
                       use_llm=True)
