@@ -10,7 +10,7 @@ from core.config import AppConfig
 from core.detection import create_detector
 from core.detection.ssim_detector import estimate_scale
 from scripts.make_synthetic_pair import PairParams
-from tests.detection.helpers import make_registration, pair_registration
+from tests.detection.helpers import ssim_config, make_registration, pair_registration
 
 pytestmark = pytest.mark.filterwarnings("ignore")
 
@@ -30,7 +30,7 @@ def test_estimate_scale_pure_scale_and_rotation() -> None:
 def test_resolution_gap_without_changes_gives_no_regions(scale: float) -> None:
     """Nesnesiz çiftte after düşük çözünürlüklü olsa da sahte bölge çıkmamalı."""
     _, reg = pair_registration(PairParams(scale=scale, n_new_objects=0))
-    res = create_detector().detect(reg)
+    res = create_detector(ssim_config()).detect(reg)
     assert res.regions == [], [(r.bbox, r.area_px) for r in res.regions][:5]
     assert res.params["registration_scale"] > 1.5
     assert res.params["working_scale"] == res.params["registration_scale"]
@@ -40,7 +40,7 @@ def test_resolution_gap_without_changes_gives_no_regions(scale: float) -> None:
 def test_resolution_gap_with_objects_detected(scale: float) -> None:
     """Ölçek farkında da eklenen nesneler bulunur."""
     pair, reg = pair_registration(PairParams(scale=scale))
-    res = create_detector().detect(reg)
+    res = create_detector(ssim_config()).detect(reg)
     for x, y, w, h in pair.added_bboxes:
         cx, cy = x + w // 2, y + h // 2
         assert any(r.bbox.x <= cx <= r.bbox.x + r.bbox.width and r.bbox.y <= cy <= r.bbox.y + r.bbox.height
@@ -50,7 +50,7 @@ def test_resolution_gap_with_objects_detected(scale: float) -> None:
 def test_native_resolution_not_downscaled() -> None:
     """Ölçek 1 ise çalışma ölçeği 1 (küçültme yok)."""
     _, reg = pair_registration(PairParams(scale=1.0))
-    assert create_detector().detect(reg).params["working_scale"] == 1.0
+    assert create_detector(ssim_config()).detect(reg).params["working_scale"] == 1.0
 
 
 def test_min_area_fraction_only_with_working_downscale() -> None:
@@ -58,7 +58,7 @@ def test_min_area_fraction_only_with_working_downscale() -> None:
     rng = np.random.default_rng(0)
     small = rng.integers(0, 255, (300, 300, 3), dtype=np.uint8)
     big = np.repeat(np.repeat(small, 8, 0), 8, 1)   # 2400x2400
-    cfg = AppConfig()
+    cfg = ssim_config()
     floor = cfg.detection.min_region_area_px
     r_same = create_detector(cfg).detect(make_registration(big, big.copy()))
     assert r_same.params["min_region_area_effective_px"] == floor
@@ -76,7 +76,7 @@ def test_40px_object_in_large_same_resolution_pair_is_found() -> None:
     before = np.clip(base * 120 + 70, 0, 255).astype(np.uint8)
     after = before.copy()
     cv2.rectangle(after, (1500, 1100), (1539, 1139), (230, 30, 30), -1)
-    res = create_detector().detect(make_registration(before, after))
+    res = create_detector(ssim_config()).detect(make_registration(before, after))
     assert any(r.bbox.x <= 1520 <= r.bbox.x + r.bbox.width and r.bbox.y <= 1120 <= r.bbox.y + r.bbox.height
                for r in res.regions)
 
@@ -84,4 +84,4 @@ def test_40px_object_in_large_same_resolution_pair_is_found() -> None:
 def test_unreliable_flag_absent_for_clean_pair() -> None:
     """Temiz çiftte 'unreliable' 0."""
     _, reg = pair_registration(PairParams(n_new_objects=0))
-    assert create_detector().detect(reg).params["unreliable"] == 0
+    assert create_detector(ssim_config()).detect(reg).params["unreliable"] == 0

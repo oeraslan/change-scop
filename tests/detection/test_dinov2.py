@@ -13,7 +13,7 @@ from core.detection import create_detector
 from core.detection.dinov2_features import Dinov2Extractor
 from scripts.make_synthetic_pair import PairParams
 from tests.detection.helpers import make_registration, pair_registration
-from tests.detection.scenarios import build_scenario, evaluate
+from tests.detection.scenarios import build_scenario, evaluate, tiny_object_scenario
 
 pytestmark = pytest.mark.filterwarnings("ignore")
 
@@ -200,6 +200,42 @@ def test_invalid_mask_respected_with_dinov2() -> None:
         det.release()
         assert res.regions == []
         assert res.change_map[~valid].max() == 0.0
+
+
+@needs_model
+@pytest.mark.parametrize("scale", [0.6, 0.4, 0.3])
+def test_fused_keeps_tiny_strong_object(scale) -> None:
+    """20 px kırmızı kare (DINOv2 patch'inden küçük): kapı SSIM'in güçlü kompakt yanıtını bastırmamalı."""
+    sc = tiny_object_scenario(scale, 20)
+    det = create_detector(_cfg("ssim+dinov2"))
+    res = det.detect(sc.registration)
+    det.release()
+    e = evaluate(res, sc)
+    assert e["hits"] == 1
+    assert e["false_regions"] == 0
+
+
+@needs_model
+def test_fused_40px_object_large_same_res_no_false_regions() -> None:
+    """3200x2400 aynı çözünürlük: 40 px nesne bulunur, kenar/doku kaynaklı DINOv2 sahte bölgesi yok."""
+    sc = tiny_object_scenario(1.0, 40, 3200, 2400)
+    det = create_detector(_cfg("ssim+dinov2"))
+    res = det.detect(sc.registration)
+    det.release()
+    e = evaluate(res, sc)
+    assert e["hits"] == 1 and e["false_regions"] == 0
+
+
+@needs_model
+def test_compact_exemption_off_under_widespread_ssim_noise() -> None:
+    """Doku/ton kaymasında (yaygın SSIM gürültüsü) kapı muafiyeti devreye girmez: sahte bölge SSIM'in 1/10'undan az."""
+    sc = build_scenario("texture_tone")
+    out = {}
+    for m in ("ssim", "ssim+dinov2"):
+        det = create_detector(_cfg(m))
+        out[m] = evaluate(det.detect(sc.registration), sc)
+        det.release()
+    assert out["ssim+dinov2"]["false_regions"] * 10 <= out["ssim"]["false_regions"]
 
 
 @needs_model

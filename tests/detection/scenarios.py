@@ -73,6 +73,24 @@ def add_texture_tone_shift(img: np.ndarray, seed: int = 3) -> np.ndarray:
     return np.clip(f, 0, 255).astype(np.uint8)
 
 
+def tiny_object_scenario(scale: float, size: int = 20, width: int = 1600, height: int = 1200) -> Scenario:
+    """Nesnesiz sahneye `size` px kırmızı kare ekler; after `scale` çözünürlüğünde + JPEG70 (integration `_tiny_pair`)."""
+    pr = make_pair(PairParams(width=width, height=height, scale=scale, n_new_objects=0))
+    ch = pr.before.copy()
+    cx, cy = int(width * 0.45), int(height * 0.45)
+    cv2.rectangle(ch, (cx - size // 2, cy - size // 2), (cx + size // 2, cy + size // 2), (230, 30, 30), -1)
+    H = np.linalg.inv(pr.homography_after_to_before)
+    after = cv2.warpPerspective(ch, H, (int(width * scale), int(height * scale)), flags=cv2.INTER_AREA)
+    ok, enc = cv2.imencode(".jpg", cv2.cvtColor(after, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 70])
+    assert ok
+    after = cv2.cvtColor(cv2.imdecode(enc, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+    from dataclasses import replace
+    reg = registration_from_pair(replace(pr, after=after))
+    truth = np.zeros((height, width), bool)
+    truth[cy - size // 2:cy + size // 2 + 1, cx - size // 2:cx + size // 2 + 1] = True
+    return Scenario(f"tiny{size}_s{scale}", reg, truth, [(cx - size // 2, cy - size // 2, size + 1, size + 1)])
+
+
 def build_scenario(name: str, seed: int = 42) -> Scenario:
     """Adlandırılmış senaryoyu kurar (bkz. `SCENARIOS`)."""
     if name == "default":

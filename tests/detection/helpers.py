@@ -7,8 +7,16 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from core.config import AppConfig
 from core.contracts import AlignmentQuality, ImageInput, PreparedImage, RegistrationResult
 from scripts.make_synthetic_pair import PairParams, SyntheticPair, make_pair
+
+
+def ssim_config() -> AppConfig:
+    """Yöntemi açıkça "ssim" olan config (testler config varsayılanından bağımsız olsun)."""
+    cfg = AppConfig()
+    cfg.detection.method = "ssim"
+    return cfg
 
 
 def prepared(pixels: np.ndarray) -> PreparedImage:
