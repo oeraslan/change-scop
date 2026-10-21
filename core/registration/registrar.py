@@ -133,6 +133,10 @@ def _geometry_ok(H: np.ndarray, size_a: tuple[int, int], size_b: tuple[int, int]
     return None
 
 
+# Bu boyutun altındaki görüntülerde güvenilir özellik eşleştirmesi beklenmez.
+SMALL_IMAGE_PX = 64
+
+
 class DefaultRegistrar:
     """`Registrar` uygulaması. Modeller ilk `register()` çağrısında lazy yüklenir; `release()` bırakır."""
 
@@ -229,6 +233,10 @@ class DefaultRegistrar:
                 before=before, after_warped=np.zeros_like(pb), valid_mask=np.zeros((hb, wb), bool),
                 homography=None, num_matches=int(n_matches), num_inliers=int(n_inliers),
                 reprojection_error_px=float(err), quality=AlignmentQuality.FAILED, notes=notes)
+
+        if min(hb, wb, ha, wa) < SMALL_IMAGE_PX:
+            notes.append(f"Görüntü hizalama için çok küçük ({wb}x{hb} / {wa}x{ha} px; "
+                         f"en az {SMALL_IMAGE_PX} px önerilir).")
 
         # ---- 1) kaba aşama
         Hc, c_matches, c_inliers, c_err, c_hull = self._coarse(matcher, pb, pa, notes)
