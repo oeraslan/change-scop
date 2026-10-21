@@ -50,6 +50,16 @@ def user_data_dir() -> Path:
     return Path.home() / f".{APP_NAME.lower()}"
 
 
+def _env_path(var: str, default: Path) -> Path:
+    """Ortam değişkeni tanımlıysa onun yolunu, değilse `default`'u döndürür.
+
+    Geliştirmede git worktree'leri `models/` ve `bin/` içermez; ajanlar ana klasörü
+    `CHANGESCOPE_MODELS_DIR` / `CHANGESCOPE_BIN_DIR` ile gösterir.
+    """
+    value = os.environ.get(var)
+    return Path(value) if value else default
+
+
 def default_config_path() -> Path:
     """Kullanıcı ayar dosyasının varsayılan konumu."""
     return user_data_dir() / "config.json"
@@ -59,8 +69,8 @@ def default_config_path() -> Path:
 class PathsConfig:
     """Dosya sistemi konumları. Varsayılanlar `app_root()` ve `user_data_dir()` altındadır."""
 
-    models_dir: Path = field(default_factory=lambda: app_root() / "models")
-    bin_dir: Path = field(default_factory=lambda: app_root() / "bin")
+    models_dir: Path = field(default_factory=lambda: _env_path("CHANGESCOPE_MODELS_DIR", app_root() / "models"))
+    bin_dir: Path = field(default_factory=lambda: _env_path("CHANGESCOPE_BIN_DIR", app_root() / "bin"))
     library_dir: Path = field(default_factory=lambda: user_data_dir() / "library")
 
     @property

@@ -83,3 +83,11 @@ def test_resolve_device(monkeypatch):
     assert resolve_device("cuda") == "cpu"
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     assert resolve_device("auto") == "cuda"
+
+
+def test_env_overrides_model_and_bin_dirs(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHANGESCOPE_MODELS_DIR", str(tmp_path / "m"))
+    monkeypatch.setenv("CHANGESCOPE_BIN_DIR", str(tmp_path / "b"))
+    cfg = AppConfig()
+    assert cfg.paths.models_dir == tmp_path / "m"
+    assert cfg.paths.llama_server_exe == tmp_path / "b" / "llama" / "llama-server.exe"
