@@ -15,7 +15,10 @@ pytest.importorskip("pytestqt")
 from tests.integration import ui_scenario  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SHOT = PROJECT_ROOT / "tests" / "integration" / "screenshots" / "real_pipeline_compare.png"
+SHOT_DIR = PROJECT_ROOT / "tests" / "integration" / "screenshots"
+# Varsayılan: ekran görüntüsü tmp_path'e yazılır (git'te değişiklik üretmez).
+# CHANGESCOPE_SAVE_SHOTS=1 ise `screenshots/` klasörüne kalıcı yazılır.
+SAVE_SHOTS = os.environ.get("CHANGESCOPE_SAVE_SHOTS") == "1"
 
 # Worker thread'inde model yükleme/torch import'u GIL'i kısa süre tutabilir; yine de ana thread
 # saniyelerce takılmamalı.
@@ -49,7 +52,9 @@ def test_main_window_runs_real_pipeline_without_freezing(qapp, tmp_path) -> None
 @pytest.mark.skipif(sys.platform != "win32", reason="windows Qt platformu gerekli")
 def test_compare_screen_screenshot_with_windows_platform(tmp_path) -> None:
     """Ayrı süreçte (QT_QPA_PLATFORM=windows) senaryoyu çalıştırıp karşılaştırma ekranının görüntüsünü kaydeder."""
-    SHOT.parent.mkdir(parents=True, exist_ok=True)
+    shot_dir = SHOT_DIR if SAVE_SHOTS else tmp_path
+    shot_dir.mkdir(parents=True, exist_ok=True)
+    SHOT = shot_dir / "real_pipeline_compare.png"
     SHOT.unlink(missing_ok=True)
     env = dict(os.environ, QT_QPA_PLATFORM="windows")
     json_path = tmp_path / "out.json"
