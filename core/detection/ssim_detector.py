@@ -66,7 +66,12 @@ def estimate_scale(homography: np.ndarray | None, shape: tuple[int, int]) -> flo
 
 
 FUSION_GATE = 0.4      # birleşimde DINOv2 skoru bu değere ulaşınca SSIM'e tam güven
-FUSION_FLOOR = 0.25    # DINOv2 skoru 0 iken birleşik skor çarpanı
+DINO_EDGE_ERODE_PX = 14  # DINOv2 kullanılırken kenar erozyonuna eklenen px (çalışma çözünürlüğünde)
+COMPACT_STRONG = 0.6  # kapı muafiyeti: SSIM(+kroma) skoru bu eşiğin üstünde
+COMPACT_MAX_PX = 1000  # ... ve bileşen alanı (çalışma çözünürlüğünde) en fazla bu kadar (~5 DINOv2 patch'i)
+COMPACT_MAX_COUNT = 25  # ... ve bu tür bileşen sayısı en fazla bu kadar (fazlası yaygın gürültü)
+COMPACT_MIN_PX = 12   # ... ve en az bu kadar (tek piksel gürültü değil)
+FUSION_FLOOR = 0.25   # DINOv2 skoru 0 iken birleşik skor çarpanı
 DINO_PREBLUR = 1.0     # DINOv2 girdisine uygulanan Gaussian sigma (px, çalışma çözünürlüğünde)
 DINO_SMOOTH = 7.0      # kalibrasyondan önce ham mesafe haritasına Gaussian sigma (px): yalıtılmış patch aykırılarını söndürür
 DINO_DEADZONE = 0.15   # medyan üstü bu kadar mesafe doku/ton gürültüsü sayılır
@@ -170,6 +175,9 @@ class SsimChangeDetector:
 
         # Geçerli alan: kenar erozyonu + SSIM penceresinin kenara taşan etkisi
         erode = int(c.edge_erode_px) + int(np.ceil((_odd(c.ssim_window) // 2 + 2) * work))
+        if use_dino:
+            # ViT kenar patch'leri (padding/dikkat sınırı) yapay mesafe üretir
+            erode += int(np.ceil(DINO_EDGE_ERODE_PX * work))
         safe = self._erode(valid, erode)
         params["effective_erode_px"] = erode
 
@@ -203,6 +211,10 @@ class SsimChangeDetector:
             # DINOv2 anlamsal "değişmedi" diyorsa (doku/ton/gölge) yapısal SSIM farkı bastırılır
             agree = np.clip(dino_map / FUSION_GATE, 0.0, 1.0)
             small = np.clip(mixed * (FUSION_FLOOR + (1.0 - FUSION_FLOOR) * agree), 0.0, 1.0).astype(np.float32)
+            # DINOv2 patch'inden (14 px) küçük ama SSIM+kromada GÜÇLÜ ve kompakt farklar kapıdan geçer
+            compact = self._compact_strong(ssim_map)
+            small = np.maximum(small, np.where(compact, ssim_map, 0.0)).astype(np.float32)
+            params["fusion_compact_px"] = COMPACT_MAX_PX
             params["fusion_gate"] = FUSION_GATE
             params["fusion_floor"] = FUSION_FLOOR
             method_used = "ssim+dinov2"
@@ -267,6 +279,19 @@ class SsimChangeDetector:
             params["chroma_deadzone"] = CHROMA_DEADZONE
             change = np.maximum(change, chroma.astype(np.float32))
         return cv2.GaussianBlur(change, (0, 0), 1.5)
+
+    @staticmethod
+    def _compact_strong(ssim_map: np.ndarray) -> np.ndarray:
+        """SSIM skoru `COMPACT_STRONG` üstünde olan ve alanı `COMPACT_MAX_PX` altında kalan bileşenler (genişletilmiş)."""
+        strong = (ssim_map >= COMPACT_STRONG).astype(np.uint8)
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(strong, connectivity=8)
+        keep = np.zeros(n, bool)
+        keep[1:] = (stats[1:, cv2.CC_STAT_AREA] <= COMPACT_MAX_PX) & (stats[1:, cv2.CC_STAT_AREA] >= COMPACT_MIN_PX)
+        if int(keep.sum()) > COMPACT_MAX_COUNT:
+            # Çok sayıda küçük güçlü leke = yaygın SSIM gürültüsü (doku/tane): muafiyet yok
+            return np.zeros(ssim_map.shape, bool)
+        m = keep[labels].astype(np.uint8)
+        return cv2.dilate(m, np.ones((5, 5), np.uint8)).astype(bool)
 
     def _dino_change_map(self, before: np.ndarray, after: np.ndarray, valid: np.ndarray,
                          safe: np.ndarray, params: dict) -> np.ndarray:

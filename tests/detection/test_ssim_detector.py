@@ -12,7 +12,7 @@ from core.config import AppConfig
 from core.contracts import AlignmentQuality, DetectionResult
 from core.detection import create_detector
 from scripts.make_synthetic_pair import PairParams
-from tests.detection.helpers import make_registration, pair_registration
+from tests.detection.helpers import ssim_config, make_registration, pair_registration
 
 pytestmark = pytest.mark.filterwarnings("ignore")
 
@@ -35,7 +35,7 @@ def _jpeg(img: np.ndarray, q: int) -> np.ndarray:
 def synthetic():
     pair, reg = pair_registration()
     t0 = time.perf_counter()
-    result = create_detector().detect(reg)
+    result = create_detector(ssim_config()).detect(reg)
     elapsed = time.perf_counter() - t0
     return pair, reg, result, elapsed
 
@@ -98,20 +98,20 @@ def test_brightness_contrast_only_no_regions():
     pair, _ = pair_registration(PairParams(n_new_objects=0))
     before = pair.before
     after = _jpeg(np.clip(before.astype(np.float32) * 1.15 + 25, 0, 255).astype(np.uint8), 70)
-    result = create_detector().detect(make_registration(before, after))
+    result = create_detector(ssim_config()).detect(make_registration(before, after))
     assert result.regions == [] or max(r.score for r in result.regions) < 0.2
 
 
 def test_jpeg_q60_no_false_alarm():
     pair, _ = pair_registration(PairParams(n_new_objects=0))
-    result = create_detector().detect(make_registration(pair.before, _jpeg(pair.before, 60)))
+    result = create_detector(ssim_config()).detect(make_registration(pair.before, _jpeg(pair.before, 60)))
     assert result.regions == []
 
 
 def test_warped_pair_without_objects_no_false_alarm():
     """Geometri + parlaklık + JPEG70 var ama nesne yok: yanlış alarm olmamalı."""
     _, reg = pair_registration(PairParams(n_new_objects=0))
-    result = create_detector().detect(reg)
+    result = create_detector(ssim_config()).detect(reg)
     assert sum(r.area_px for r in result.regions) < 800
 
 
@@ -123,7 +123,7 @@ def test_diff_outside_valid_mask_ignored():
     valid = np.ones((h, w), bool)
     valid[:, w // 2:] = False
     after[300:500, w // 2 + 100:w // 2 + 300] = 255          # geçersiz alanda büyük fark
-    result = create_detector().detect(make_registration(before, after, valid))
+    result = create_detector(ssim_config()).detect(make_registration(before, after, valid))
     assert result.regions == []
     assert np.all(result.change_map[~valid] == 0)
 
@@ -141,7 +141,7 @@ def test_rectangle_added_exact_region():
     before = pair.before
     after = before.copy()
     cv2.rectangle(after, (700, 500), (819, 579), (230, 40, 40), -1)
-    result = create_detector().detect(make_registration(before, after))
+    result = create_detector(ssim_config()).detect(make_registration(before, after))
     assert len(result.regions) == 1
     b = result.regions[0].bbox
     assert abs(b.x - 700) <= 10 and abs(b.y - 500) <= 10
@@ -152,12 +152,12 @@ def test_failed_raises():
     pair, _ = pair_registration(PairParams(n_new_objects=0))
     reg = make_registration(pair.before, pair.before, quality=AlignmentQuality.FAILED)
     with pytest.raises(ValueError):
-        create_detector().detect(reg)
+        create_detector(ssim_config()).detect(reg)
 
 
 def test_sensitivity_scales_threshold():
     pair, reg = pair_registration(PairParams(n_new_objects=0, width=800, height=600))
-    low, high = AppConfig(), AppConfig()
+    low, high = ssim_config(), ssim_config()
     low.detection.sensitivity, high.detection.sensitivity = 0.1, 0.9
     t_low = create_detector(low).detect(reg).params["threshold"]
     t_high = create_detector(high).detect(reg).params["threshold"]
