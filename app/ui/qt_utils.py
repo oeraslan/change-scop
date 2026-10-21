@@ -78,3 +78,19 @@ def crop_rgb(pixels: np.ndarray, x: int, y: int, w: int, h: int, margin: float =
     if x1 <= x0 or y1 <= y0:
         return np.zeros((8, 8, 3), dtype=np.uint8)
     return pixels[y0:y1, x0:x1]
+
+
+def invalid_area_to_qimage(valid_mask: np.ndarray) -> QImage | None:
+    """valid_mask dışındaki pikseller için hafif koyu + ince çapraz taramalı RGBA katman; hepsi geçerliyse None."""
+    valid = np.asarray(valid_mask).astype(bool)
+    if valid.ndim != 2 or valid.all():
+        return None
+    h, w = valid.shape
+    yy, xx = np.indices((h, w))
+    hatch = ((xx + yy) % 14) < 2
+    rgba = np.zeros((h, w, 4), np.uint8)
+    inv = ~valid
+    rgba[inv] = (8, 12, 20, 110)
+    rgba[inv & hatch] = (203, 213, 225, 130)
+    img = QImage(rgba.data, w, h, 4 * w, QImage.Format.Format_RGBA8888)
+    return img.copy()

@@ -111,7 +111,7 @@ class DemoDetector:
             ChangeRegion(i, BoundingBox(x, y, w, h), m, min(1.0, s), a)
             for i, (s, x, y, w, h, a, m) in enumerate(found[:12], start=1)
         ]
-        return DetectionResult(cmap, regions, "demo-diff", {"otsu": float(otsu)})
+        return DetectionResult(cmap, regions, "demo-diff", {"otsu": float(otsu), "method_requested": AppConfig().detection.method})
 
 
 class DemoAnalyst:

@@ -420,6 +420,7 @@ def test_history_open_from_cache_recompare_delete_reveal(window, populated, qtbo
     assert set(lv.gallery.selected_ids) == {recs[0].id, recs[1].id}
 
     lv.show_tab("history")
+    rec = library.repo.find_comparison(recs[0].id, recs[1].id)   # yeniden karşılaştırma sonuç dizinini yeniler
     result_dir = library.abs_path(rec.result_dir)
     assert result_dir.exists()
     lv.delete_comparison(rec)

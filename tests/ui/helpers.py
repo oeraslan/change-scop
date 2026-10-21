@@ -87,7 +87,8 @@ def make_result(
         for r in regions:
             b = r.bbox
             cmap[b.y:b.y + b.height, b.x:b.x + b.width] = r.score
-        detection = DetectionResult(change_map=cmap, regions=regions, method="ssim")
+        detection = DetectionResult(change_map=cmap, regions=regions, method="ssim",
+                                  params={"method_requested": "ssim+dinov2"})
     return ComparisonResult(
         registration=registration, detection=detection, llm_used=with_llm, elapsed_s=0.1,
         summary=SUMMARY if with_llm else None,
@@ -128,7 +129,8 @@ class InstantDetector:
         cmap = np.zeros((h, w), dtype=np.float32)
         for r in regions:
             cmap[r.bbox.y:r.bbox.y + r.bbox.height, r.bbox.x:r.bbox.x + r.bbox.width] = r.score
-        return DetectionResult(change_map=cmap, regions=regions, method="ssim")
+        return DetectionResult(change_map=cmap, regions=regions, method="ssim",
+                                  params={"method_requested": "ssim+dinov2"})
 
 
 class InstantAnalyst:

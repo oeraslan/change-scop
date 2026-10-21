@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QRectF, QSettings, QStandardPaths, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -35,7 +35,7 @@ from app.storage import ComparisonRecord, ImageRecord, Library
 from app.ui.ai_panel import AiPanel
 from app.ui.exporter import export_comparison
 from app.ui.mask_editor import TOOL_BRUSH, MaskEditor, MaskToolbar
-from app.ui.qt_utils import heatmap_to_qimage, rgb_to_qimage
+from app.ui.qt_utils import heatmap_to_qimage, invalid_area_to_qimage, rgb_to_qimage
 from app.ui.sync_graphics_view import RegionSpec, SyncGraphicsView, SyncGroup
 from app.ui.theme import ACCENT, EmptyState, Pill, Surface
 from app.ui.workers import ComparisonWorker, MaskWorker, load_preview  # noqa: F401 - load_preview geriye uyumluluk
@@ -376,7 +376,18 @@ class CompareView(QWidget):
             self.after_view.set_regions([])
             self.before_view.set_heatmap(None)
             self.after_view.set_heatmap(None)
+            self.before_view.set_invalid_overlay(None)
+            self.after_view.set_invalid_overlay(None)
         else:
+            valid = reg.valid_mask
+            overlap = float(valid.mean()) if valid.size else 1.0
+            invalid_img = invalid_area_to_qimage(valid)
+            self.before_view.set_invalid_overlay(invalid_img)
+            self.after_view.set_invalid_overlay(invalid_img)
+            if overlap < 0.95:
+                self._info("info", "Görüntüler kısmen örtüşüyor",
+                           f"Görüntülerin %{round((1 - overlap) * 100)}'i örtüşmüyor; bu alanlarda fark aranmaz.",
+                           key="overlap")
             specs = [self._spec(r) for r in result.detection.regions]  # type: ignore[union-attr]
             self.before_view.set_regions(specs)
             self.after_view.set_regions(specs)
@@ -731,9 +742,14 @@ class CompareView(QWidget):
         """Dosya seçtirip PNG + CSV + özet yazar."""
         if self._result is None:
             return
-        default = "karsilastirma.png"
+        qs = QSettings("ChangeScope", "ChangeScope")
+        folder = str(qs.value("export_dir", "") or "")
+        if not folder or not Path(folder).is_dir():
+            folder = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)                 or str(Path.home())
+        default = str(Path(folder).resolve() / "karsilastirma.png")
         path, _ = QFileDialog.getSaveFileName(self, "Dışa aktar", default, "PNG (*.png)")
         if path:
+            qs.setValue("export_dir", str(Path(path).resolve().parent))
             self.export_to(Path(path))
 
     def export_to(self, png_path: Path) -> list[Path]:
