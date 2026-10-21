@@ -189,8 +189,6 @@ def test_palette_png(real_pipeline, files, tmp_path, pair) -> None:
     assert result.registration.quality is not AlignmentQuality.FAILED, result.registration.notes
 
 
-@pytest.mark.xfail(strict=True, reason="16-bit gri PNG: Pillow I;16 → RGB dönüşümü değerleri 255'e kırpıyor, "
-                                       "görüntü beyaza doyuyor (preprocess.py:89)")
 def test_16bit_grayscale_png_is_normalised(tmp_path, pair) -> None:
     """16-bit gri PNG (uydu/termal kaynaklarda yaygın) 8-bit karşılığına yakın yüklenmeli."""
     gray8 = cv2.cvtColor(pair.before, cv2.COLOR_RGB2GRAY)
@@ -254,8 +252,6 @@ def test_sift_matcher_configured_works(files, pair) -> None:
     assert all(ev.hits)
 
 
-@pytest.mark.xfail(strict=True, reason="Pillow DecompressionBombError ValueError'a çevrilmiyor (preprocess.py:90); "
-                                       "UI 'failed' yerine genel hata yoluna düşer")
 def test_decompression_bomb_raises_value_error(monkeypatch, tmp_path, files) -> None:
     """Pillow'un 'decompression bomb' koruması da anlaşılır `ValueError` olmalı."""
     path = save_image(tmp_path / "bomb.png", np.zeros((300, 300, 3), np.uint8))
