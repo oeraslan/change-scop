@@ -26,6 +26,44 @@ CHROMA_DEADZONE = 12.0   # bu kadar a/b farkı sıkıştırma/ışık gürültü
 CHROMA_SCALE = 30.0      # deadzone üstünde bu kadar fark -> terim azami
 
 
+MIN_AREA_FRACTION = 4e-4   # geçerli alanın bu oranı: min bölge alanı (config değeri alt sınır)
+SCALE_COMPENSATE_FROM = 1.2   # etkin büyütme bu değerin üstündeyse çözünürlük eşitlenir
+MAX_REGIONS_RELIABLE = 40  # bundan fazla bölge -> sonuç güvenilmez işaretlenir
+THRESHOLD_SCALE_GAIN = 0.08  # çözünürlük farkı büyüdükçe taban eşik (1 + gain*(s-1)) kadar yükselir
+
+
+def estimate_scale(homography: np.ndarray | None, shape: tuple[int, int]) -> float:
+    """after->before homografisinin görüntü merkezindeki yerel ölçeği: sqrt(|det J|).
+
+    1'den büyük değer, after'ın before'a büyütülerek (bulanıklaşarak) warp edildiğini gösterir.
+    """
+    if homography is None:
+        return 1.0
+    H = np.asarray(homography, dtype=np.float64)
+    if H.shape != (3, 3) or not np.isfinite(H).all():
+        return 1.0
+    h, w = shape
+    # Merkezdeki before noktasına karşılık gelen after noktasında Jacobian (ters homografi)
+    try:
+        Hi = np.linalg.inv(H)
+    except np.linalg.LinAlgError:
+        return 1.0
+    x, y = w / 2.0, h / 2.0
+    d = Hi[2, 0] * x + Hi[2, 1] * y + Hi[2, 2]
+    if abs(d) < 1e-12:
+        return 1.0
+    u = (Hi[0, 0] * x + Hi[0, 1] * y + Hi[0, 2]) / d
+    v = (Hi[1, 0] * x + Hi[1, 1] * y + Hi[1, 2]) / d
+    J = np.array([
+        [(Hi[0, 0] - u * Hi[2, 0]) / d, (Hi[0, 1] - u * Hi[2, 1]) / d],
+        [(Hi[1, 0] - v * Hi[2, 0]) / d, (Hi[1, 1] - v * Hi[2, 1]) / d],
+    ])
+    det = abs(float(np.linalg.det(J)))     # before px -> after px alan oranı (= 1/s^2)
+    if det <= 1e-12:
+        return 1.0
+    return float(np.clip(1.0 / np.sqrt(det), 1.0 / 16.0, 16.0))
+
+
 def _odd(n: int, minimum: int = 3) -> int:
     n = max(int(n), minimum)
     return n if n % 2 == 1 else n + 1
@@ -77,20 +115,46 @@ class SsimChangeDetector:
             "edge_erode_px": c.edge_erode_px,
             "method_used": "ssim",
         }
+        scale = estimate_scale(registration.homography, before.shape[:2])
+        # s > 1: after before'a büyütülmüş. Çözünürlük eşitleme: ikisini 1/s'e küçült (INTER_AREA)
+        work = scale if scale > SCALE_COMPENSATE_FROM else 1.0
+        params["registration_scale"] = round(scale, 3)
+        params["working_scale"] = round(work, 3)
+        params["working_downscale"] = round(1.0 / work, 3)
+        min_area = max(int(c.min_region_area_px), int(round(MIN_AREA_FRACTION * float(valid.sum()))))
+        params["min_region_area_effective_px"] = min_area
+        params["min_region_area_fraction"] = MIN_AREA_FRACTION
         if c.method != "ssim":
             params["fallback_reason"] = "dinov2 henüz uygulanmadı (Faz 2); SSIM kullanıldı"
 
         # Geçerli alan: kenar erozyonu + SSIM penceresinin kenara taşan etkisi
-        erode = int(c.edge_erode_px) + _odd(c.ssim_window) // 2
+        erode = int(c.edge_erode_px) + int(np.ceil((_odd(c.ssim_window) // 2 + 2) * work))
         safe = self._erode(valid, erode)
         params["effective_erode_px"] = erode
 
-        change = self._ssim_change_map(before, after, valid, params)
+        if work > 1.0:
+            h, w = before.shape[:2]
+            size = (max(int(round(w / work)), 8), max(int(round(h / work)), 8))
+            b_s = cv2.resize(before, size, interpolation=cv2.INTER_AREA)
+            a_s = cv2.resize(after, size, interpolation=cv2.INTER_AREA)
+            v_s = cv2.resize(valid.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST).astype(bool)
+            small = self._ssim_change_map(b_s, a_s, v_s, params)
+            change = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+        else:
+            change = self._ssim_change_map(before, after, valid, params)
         change[~safe] = 0.0
 
         mask = self._threshold(change, safe, params)
-        regions = self._regions(mask, change, safe, float(params["threshold"]))
+        regions = self._regions(mask, change, safe, float(params["threshold"]), work, min_area)
         params["num_regions"] = len(regions)
+        low_otsu = (params.get("threshold_mode") == "otsu"
+                    and float(params["otsu_threshold"]) < 0.8 * float(params.get("min_threshold_effective", c.min_threshold)))
+        # Değişiklik yokken Otsu doğal olarak düşüktür; yalnızca çok sayıda bölgeyle birlikteyse şüpheli
+        if len(regions) > MAX_REGIONS_RELIABLE or (low_otsu and len(regions) > MAX_REGIONS_RELIABLE // 4):
+            params["unreliable"] = 1
+            params["unreliable_reason"] = "Otsu çok düşük veya aşırı bölge sayısı (çözünürlük/ışık uyumsuzluğu olabilir)"
+        else:
+            params["unreliable"] = 0
         return DetectionResult(change_map=change, regions=regions, method="ssim", params=params)
 
     # ------------------------------------------------------------------
@@ -140,7 +204,9 @@ class SsimChangeDetector:
         if c.threshold == "otsu":
             vals = np.clip(change[safe] * 255.0, 0, 255).astype(np.uint8).reshape(-1, 1)
             otsu, _ = cv2.threshold(vals, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            base = max(float(otsu) / 255.0, c.min_threshold)
+            min_thr = c.min_threshold * (1.0 + THRESHOLD_SCALE_GAIN * max(float(params.get("working_scale", 1.0)) - 1.0, 0.0))
+            params["min_threshold_effective"] = round(min_thr, 4)
+            base = max(float(otsu) / 255.0, min_thr)
             params["threshold_mode"] = "otsu"
             params["otsu_threshold"] = round(float(otsu) / 255.0, 4)
         else:
@@ -152,11 +218,13 @@ class SsimChangeDetector:
         params["threshold"] = round(thr, 4)
         return (change >= thr) & safe
 
-    def _regions(self, mask: np.ndarray, change: np.ndarray, safe: np.ndarray, thr: float) -> list[ChangeRegion]:
+    def _regions(self, mask: np.ndarray, change: np.ndarray, safe: np.ndarray, thr: float,
+                 work: float = 1.0, min_area: int | None = None) -> list[ChangeRegion]:
         c = self.cfg
+        min_area = c.min_region_area_px if min_area is None else min_area
         m = mask.astype(np.uint8)
         if c.morph_kernel_px > 1:
-            k = _odd(c.morph_kernel_px)
+            k = _odd(int(round(c.morph_kernel_px * max(work, 1.0))))
             ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
             m = cv2.morphologyEx(m, cv2.MORPH_OPEN, ker)
             m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker)
@@ -165,7 +233,7 @@ class SsimChangeDetector:
         found: list[tuple[float, BoundingBox, np.ndarray, int]] = []
         for i in range(1, n):
             x, y, w, h, area = (int(v) for v in stats[i])
-            if area < c.min_region_area_px:
+            if area < min_area:
                 continue
             sub = labels[y:y + h, x:x + w] == i
             # Düz yüzeylerin içi (SSIM yapı farkı görmez) halka gibi kalabilir: delikleri doldur
