@@ -305,9 +305,6 @@ def test_cache_key_follows_mask_and_only_latest_is_kept(tmp_path, real_result) -
         lib.close()
 
 
-@pytest.mark.xfail(strict=True, reason="upsert_comparison satırı yeni mask_hash'e çevirir, dosyalar SONRA yazılır "
-                   "(app/storage/library.py:save_comparison ~satır 255-259): arada eski sonuç yeni maskeli önbellek "
-                   "gibi sunulur; satır dosyalar yazıldıktan sonra güncellenmeli")
 def test_cache_not_served_while_result_files_are_being_rewritten(tmp_path, real_result, monkeypatch) -> None:
     """upsert satırı yeni maske özetine çevirir, dosyalar sonra yazılır: arada okuyan ESKİ sonucu yeni maske sanmamalı."""
     lib = Library(tmp_path / "lib")
@@ -411,9 +408,6 @@ def test_cascade_deletes_leave_no_orphan_files(tmp_path, real_result) -> None:
         lib.close()
 
 
-@pytest.mark.xfail(strict=True, reason="comparisons.folder_id 'önce' görüntüsünün klasörünün KOPYASI; move_image güncellemiyor "
-                   "(app/storage/repository.py:move_image): görüntü taşınınca geçmiş eski klasörde görünür ve eski klasör "
-                   "silinince (ON DELETE CASCADE) görüntüleri yaşayan karşılaştırma + sonuç dosyaları da silinir")
 def test_moving_before_image_keeps_history_attached_to_its_new_folder(tmp_path, real_result) -> None:
     """'Önce' görüntüsü başka klasöre taşınıp eski klasör silinince karşılaştırma kaydı kaybolmamalı."""
     lib = Library(tmp_path / "lib")
@@ -434,8 +428,6 @@ def test_moving_before_image_keeps_history_attached_to_its_new_folder(tmp_path, 
 
 # --------------------------------------------------------------------------- 6. EXIF'li görüntünün küçük resmi
 
-@pytest.mark.xfail(strict=True, reason="make_thumbnail EXIF yönünü uygulamıyor: galeri küçük resmi ve ImageRecord "
-                   "width/height, ön işlemenin (exif_transpose) gördüğünden farklı yönde (app/storage/library.py:make_thumbnail)")
 def test_thumbnail_respects_exif_orientation(tmp_path) -> None:
     """Gösterim 160x120 (yatay), saklanan 120x160 + EXIF=6: küçük resim yatay olmalı."""
     rng = np.random.default_rng(1)
@@ -595,8 +587,6 @@ def test_ui_mask_draw_save_recompare_removes_region(qapp, ui_env, sep_pair) -> N
 
 # --------------------------------------------------------------------------- 9. dışa aktarma varsayılan yolu
 
-@pytest.mark.xfail(strict=True, reason="export_dialog varsayılanı göreli 'karsilastirma.png': çalışma dizinine "
-                   "(proje köküne) yazar (app/ui/compare_view.py:734); Resimler klasörü kullanılmalı")
 def test_export_dialog_default_path_is_absolute_user_folder(qapp, tmp_path, monkeypatch) -> None:
     """Kaydet penceresi varsayılan yolu mutlak (kullanıcının Resimler klasörü) olmalı."""
     from app.ui import compare_view as cvmod
