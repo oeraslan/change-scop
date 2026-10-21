@@ -55,12 +55,12 @@ def test_load_and_detect_without_network(no_network) -> None:
 def test_cpu_path_small_image() -> None:
     """Cihaz cpu iken küçük (14'ün katı olmayan boyutlu) görüntüde çalışır."""
     pair, reg = pair_registration(PairParams(**SMALL))
-    det = create_detector(_cfg("ssim+dinov2", "cpu"))
+    det = create_detector(_cfg("dinov2", "cpu"))
     res = det.detect(reg)
     det.release()
     assert res.change_map.shape == pair.before.shape[:2]
     assert res.params["dinov2_device"] == "cpu"
-    assert res.method == "ssim+dinov2"
+    assert res.method == "dinov2"
     assert 0.0 <= res.change_map.min() and res.change_map.max() <= 1.0
 
 
