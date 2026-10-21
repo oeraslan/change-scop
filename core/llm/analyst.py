@@ -12,7 +12,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Callable, Protocol
 
 import cv2
 import httpx
@@ -46,7 +46,7 @@ REGION_PROMPT = (
     "(ör. gökyüzü, ince ip/kablo/çizgi, yaprak dokusu). Sadece nesnenin eklenmesi, kaldırılması, taşınması ya da "
     "yapının/zeminin belirgin biçimde değişmesi gerçek değişikliktir; ince çizgi veya doku farkı için false_alarm de; "
     "emin olamazsan uncertain de.\n"
-    "Açıklamada çerçeveden veya görüntü sıralamasından söz etme; yalnızca sahnedeki nesneyi/farkı anlat.\n"
+    "Açıklamaya 'Çerçevenin içinde', 'İşaretli alanda' gibi ifadelerle BAŞLAMA ve çerçeveden/görüntü sıralamasından söz etme; yalnızca sahnedeki nesneyi/farkı anlat.\n"
     "Cevabını SADECE tek bir JSON nesnesi olarak ver, başka hiçbir metin yazma:\n"
     '{{"verdict": "real_change" | "false_alarm" | "uncertain", '
     '"description": "<Türkçe, 1-2 kısa cümle: ne değişti ya da neden yanlış alarm>", '
@@ -171,7 +171,7 @@ def parse_verdict(text: str) -> ParsedVerdict | None:
     if verdict is None:
         return None
     desc = obj.get("description")
-    desc = str(desc).strip() if desc is not None else ""
+    desc = strip_frame_phrases(str(desc).strip()) if desc is not None else ""
     conf: float | None
     try:
         conf = float(obj.get("confidence"))
@@ -179,6 +179,27 @@ def parse_verdict(text: str) -> ParsedVerdict | None:
     except (TypeError, ValueError):
         conf = None
     return ParsedVerdict(verdict, desc, conf)
+
+
+_FRAME_PREFIX = re.compile(
+    r"^\s*(?:(?:sarı\s+)?çerçeve(?:nin)?\s+(?:içinde|içerisinde|içindeki|içerisindeki)|"
+    r"işaretli\s+(?:alan|bölge)(?:da|de|ın|in|nın|nin)?(?:\s+(?:içinde|içerisinde))?|"
+    r"işaretlenen\s+(?:alan|bölge)(?:da|de)?)\s*[,:;\-–]?\s*",
+    re.IGNORECASE,
+)
+
+
+def strip_frame_phrases(text: str) -> str:
+    """Baştaki 'Çerçevenin içinde', 'İşaretli alanda' gibi ifadeleri kırpar, ilk harfi büyütür."""
+    out = text
+    for _ in range(2):
+        new = _FRAME_PREFIX.sub("", out, count=1)
+        if new == out:
+            break
+        out = new
+    if out and out != text:
+        out = out[0].upper() + out[1:]
+    return out.strip()
 
 
 def _extract_json_object(text: str) -> object | None:
@@ -263,6 +284,8 @@ class GemmaRegionAnalyst:
         self.mark_bbox = mark_bbox
         self.stats = AnalysisStats()
         self.last_error: str | None = None
+        # (biten, toplam, mesaj); pipeline UI ilerlemesi için ayarlar. İstisnası analizi bozmaz.
+        self.progress_callback: Callable[[int, int, str], None] | None = None
         self._max_consecutive_transport_errors = 3
 
     # -- RegionAnalyst -----------------------------------------------------------
@@ -313,6 +336,8 @@ class GemmaRegionAnalyst:
         ranked = sorted(detection.regions, key=lambda r: r.score, reverse=True)[: max(0, cfg.max_regions)]
         if not ranked:
             return detection
+        total = len(ranked)
+        self._notify(0, total, "Yapay zekâ modeli yükleniyor…")
         base_url = self.server.start()
         if base_url is None:
             self.last_error = self.server.info.error
@@ -323,7 +348,7 @@ class GemmaRegionAnalyst:
         after = registration.after_warped
         consecutive_errors = 0
         with httpx.Client(base_url=base_url, timeout=cfg.request_timeout_s) as client:
-            for region in ranked:
+            for idx, region in enumerate(ranked, start=1):
                 t0 = time.monotonic()
                 try:
                     parsed = self._analyze_region(client, before, after, region)
@@ -335,6 +360,7 @@ class GemmaRegionAnalyst:
                     region.verdict = ChangeVerdict.UNCERTAIN
                     region.description = None
                     region.llm_confidence = None
+                    self._notify(idx, total, f"Bölge {idx}/{total} yorumlandı")
                     if consecutive_errors >= self._max_consecutive_transport_errors:
                         log.error("Art arda %d istek hatası; kalan bölgeler atlanıyor", consecutive_errors)
                         break
@@ -349,7 +375,18 @@ class GemmaRegionAnalyst:
                     region.verdict = parsed.verdict
                     region.description = parsed.description or None
                     region.llm_confidence = parsed.confidence
+                self._notify(idx, total, f"Bölge {idx}/{total} yorumlandı")
         return detection
+
+    def _notify(self, done: int, total: int, message: str) -> None:
+        """İlerleme geri çağrısını çağırır; hatası analizi bozmaz."""
+        cb = self.progress_callback
+        if cb is None:
+            return
+        try:
+            cb(done, total, message)
+        except Exception:  # noqa: BLE001
+            log.exception("progress_callback hatası yok sayıldı")
 
     def _analyze_region(self, client: httpx.Client, before: np.ndarray, after: np.ndarray,
                         region: ChangeRegion) -> ParsedVerdict | None:
