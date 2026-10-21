@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.ui.mask_editor import BrushCursorItem, MaskEditor, MaskOverlayItem
 from app.ui.theme import VERDICT_COLORS, VERDICT_LABELS, palette
 from core.contracts import ChangeVerdict
 
@@ -181,6 +182,15 @@ class SyncGraphicsView(QGraphicsView):
         self._anims: dict[str, QPropertyAnimation] = {}
         self._zoom_anim: QVariantAnimation | None = None
         self._press_pos: QPointF | None = None
+        # Maske çizim modu
+        self._mask_editor: MaskEditor | None = None
+        self._mask_item: MaskOverlayItem | None = None
+        self._cursor_item: BrushCursorItem | None = None
+        self._mask_mode = False
+        self._space_down = False
+        self._stroking = False
+        self._panning = False
+        self._pan_last = QPointF()
 
         self.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
@@ -439,14 +449,158 @@ class SyncGraphicsView(QGraphicsView):
         event.accept()
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if self._mask_mode:
+            self.mousePressEvent(event)         # çift tık çizimi bozmasın: ikinci basış da vuruş sayılır
+            return
         self.fit()
         event.accept()
 
+    # -- maske çizim modu ----------------------------------------------------
+
+    def attach_mask_editor(self, editor: "MaskEditor") -> None:
+        """Ortak maske modelini bağlar; overlay ve fırça imleci sahneye eklenir (başta gizli)."""
+        self.detach_mask_editor()
+        self._mask_editor = editor
+        self._mask_item = MaskOverlayItem(editor)
+        self._cursor_item = BrushCursorItem()
+        self._mask_item.setVisible(False)
+        self._scene.addItem(self._mask_item)
+        self._scene.addItem(self._cursor_item)
+
+    def detach_mask_editor(self) -> None:
+        """Maske katmanlarını kaldırır."""
+        self.set_mask_mode(False)
+        for item in (self._mask_item, self._cursor_item):
+            if item is not None:
+                self._scene.removeItem(item)
+        self._mask_item = self._cursor_item = None
+        self._mask_editor = None
+
+    def mask_item_visible(self) -> bool:
+        """Maske overlay'i şu an görünür mü?"""
+        return self._mask_item is not None and self._mask_item.isVisible()
+
+    def mask_mode(self) -> bool:
+        return self._mask_mode
+
+    def set_mask_mode(self, on: bool) -> None:
+        """Maske modu: sol tuş ile çizim (veya orta tuş / Boşluk / Kaydır aracı ile pan), overlay görünür."""
+        self._mask_mode = bool(on) and self._mask_editor is not None
+        if self._mask_item is not None:
+            self._mask_item.sync_geometry()
+            self._mask_item.setVisible(self._mask_mode)
+        if self._cursor_item is not None:
+            self._cursor_item.setVisible(False)
+        self._stroking = self._panning = False
+        self._refresh_paint_cursor()
+
+    def _pan_active(self) -> bool:
+        return self._mask_editor is not None and (self._space_down or self._mask_editor.tool == "pan")
+
+    def _refresh_paint_cursor(self) -> None:
+        if not self._mask_mode:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.viewport().unsetCursor()
+            return
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.viewport().setCursor(
+            Qt.CursorShape.OpenHandCursor if self._pan_active() else Qt.CursorShape.CrossCursor)
+
+    def refresh_mask_tool(self) -> None:
+        """Araç değişti: imleç / fırça halkası güncellenir."""
+        self._refresh_paint_cursor()
+        if self._cursor_item is not None and self._pan_active():
+            self._cursor_item.setVisible(False)
+
+    def _paint_press(self, event) -> bool:
+        """Maske modunda fare basışı; işlendiyse True."""
+        assert self._mask_editor is not None
+        button = event.button()
+        if button == Qt.MouseButton.MiddleButton or (button == Qt.MouseButton.LeftButton and self._pan_active()):
+            self._panning = True
+            self._pan_last = event.position()
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            return True
+        if button == Qt.MouseButton.LeftButton:
+            pos = self.mapToScene(event.position().toPoint())
+            self._stroking = True
+            self._mask_editor.begin_stroke(pos.x(), pos.y())
+            return True
+        return False
+
+    def _paint_move(self, event) -> None:
+        assert self._mask_editor is not None
+        if self._panning:
+            d = event.position() - self._pan_last
+            self._pan_last = event.position()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(round(d.x())))
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(round(d.y())))
+            return
+        pos = self.mapToScene(event.position().toPoint())
+        if self._cursor_item is not None:
+            show = not self._pan_active() and self._image_rect.contains(pos)
+            self._cursor_item.setVisible(show)
+            if show:
+                self._cursor_item.place(pos, self._mask_editor.brush_px)
+        if self._stroking:
+            self._mask_editor.continue_stroke(pos.x(), pos.y())
+
+    def _paint_release(self, event) -> None:
+        assert self._mask_editor is not None
+        if self._stroking:
+            self._stroking = False
+            self._mask_editor.end_stroke()
+        if self._panning:
+            self._panning = False
+            self._refresh_paint_cursor()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if self._mask_mode and event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+            self._space_down = True
+            self._refresh_paint_cursor()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+            self._space_down = False
+            if self._mask_mode:
+                self._refresh_paint_cursor()
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        if self._mask_mode:
+            self.setFocus(Qt.FocusReason.MouseFocusReason)     # Boşluk tuşu için odak
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if self._cursor_item is not None:
+            self._cursor_item.setVisible(False)
+        super().leaveEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._mask_mode and self._mask_editor is not None:
+            self._paint_move(event)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        if self._mask_mode and self._mask_editor is not None:
+            if self._paint_press(event):
+                event.accept()
+                return
         self._press_pos = event.position()
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._mask_mode and self._mask_editor is not None:
+            self._paint_release(event)
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
         if self._press_pos is not None and event.button() == Qt.MouseButton.LeftButton:
             moved = (event.position() - self._press_pos).manhattanLength()

@@ -54,7 +54,18 @@ def _migrate_v1(con: sqlite3.Connection) -> None:
         con.execute(stmt)
 
 
-SCHEMA_MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1]
+def _migrate_v2(con: sqlite3.Connection) -> None:
+    """Faz 2: görüntüye bağlı yok sayma maskesi + karşılaştırmanın hangi maskeyle/yöntemle çalıştığı."""
+    for stmt in (
+        "ALTER TABLE images ADD COLUMN mask_path TEXT NULL",
+        "ALTER TABLE images ADD COLUMN mask_hash TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE comparisons ADD COLUMN mask_hash TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE comparisons ADD COLUMN method TEXT NOT NULL DEFAULT ''",
+    ):
+        con.execute(stmt)
+
+
+SCHEMA_MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2]
 SCHEMA_VERSION = len(SCHEMA_MIGRATIONS)
 
 
@@ -70,6 +81,7 @@ def _image(row: sqlite3.Row) -> ImageRecord:
     return ImageRecord(
         row["id"], row["folder_id"], row["file_name"], row["original_name"], row["captured_at"],
         row["source"], row["width"], row["height"], row["thumb_path"], row["created_at"],
+        row["mask_path"], row["mask_hash"],
     )
 
 
@@ -77,6 +89,7 @@ def _comparison(row: sqlite3.Row) -> ComparisonRecord:
     return ComparisonRecord(
         row["id"], row["folder_id"], row["before_image_id"], row["after_image_id"],
         row["result_dir"], row["quality"], row["region_count"], row["summary"], row["created_at"],
+        row["mask_hash"], row["method"],
     )
 
 
@@ -224,9 +237,9 @@ class LibraryRepository:
             marks = ",".join("?" * len(ids))
             paths: list[str] = []
             for row in self._con.execute(
-                f"SELECT file_name, thumb_path FROM images WHERE folder_id IN ({marks})", ids
+                f"SELECT file_name, thumb_path, mask_path FROM images WHERE folder_id IN ({marks})", ids
             ).fetchall():
-                paths += [p for p in (row["file_name"], row["thumb_path"]) if p]
+                paths += [p for p in (row["file_name"], row["thumb_path"], row["mask_path"]) if p]
             # Bu klasörlerdeki görüntülere bağlı tüm karşılaştırmalar (başka klasördekiler dahil).
             sub = f"SELECT id FROM images WHERE folder_id IN ({marks})"
             for row in self._con.execute(
@@ -334,12 +347,17 @@ class LibraryRepository:
                 self._con.execute("UPDATE images SET source = ? WHERE id = ?", (source, image_id))
 
     def delete_image(self, image_id: int) -> list[str]:
-        """Görüntüyü ve ona bağlı karşılaştırmaları siler. Diskten silinecek göreli yolları döndürür."""
+        """Görüntüyü, maskesini ve ona bağlı karşılaştırmaları siler (cascade).
+
+        Kural: bir görüntü silinince onu "önce" ya da "sonra" olarak kullanan TÜM karşılaştırma kayıtları
+        ve sonuç klasörleri de silinir (yarım / "kaynak silindi" kayıtları bırakılmaz). Diskten silinecek
+        göreli yolları döndürür.
+        """
         with self._tx():
             img = self.get_image(image_id)
             if img is None:
                 return []
-            paths = [p for p in (img.file_name, img.thumb_path) if p]
+            paths = [p for p in (img.file_name, img.thumb_path, img.mask_path) if p]
             for row in self._con.execute(
                 "SELECT result_dir FROM comparisons WHERE before_image_id = ? OR after_image_id = ?",
                 (image_id, image_id),
@@ -348,25 +366,84 @@ class LibraryRepository:
             self._con.execute("DELETE FROM images WHERE id = ?", (image_id,))
         return paths
 
+    def set_image_mask(self, image_id: int, mask_path: str | None, mask_hash: str) -> str | None:
+        """Görüntünün maske dosyası/özetini ayarlar (None → maske kaldırılır). Önceki maske yolunu döndürür."""
+        with self._tx():
+            row = self._con.execute("SELECT mask_path FROM images WHERE id = ?", (image_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"Görüntü yok: {image_id}")
+            self._con.execute(
+                "UPDATE images SET mask_path = ?, mask_hash = ? WHERE id = ?",
+                (mask_path, mask_hash if mask_path else "", image_id),
+            )
+            return row["mask_path"]
+
+    def count_comparisons_for_image(self, image_id: int) -> int:
+        """Görüntüyü "önce" ya da "sonra" olarak kullanan karşılaştırma sayısı."""
+        with self._lock:
+            return int(self._con.execute(
+                "SELECT COUNT(*) FROM comparisons WHERE before_image_id = ? OR after_image_id = ?",
+                (image_id, image_id),
+            ).fetchone()[0])
+
     # -- karşılaştırmalar ----------------------------------------------------
 
     def add_comparison(
         self, folder_id: int | None, before_image_id: int, after_image_id: int, result_dir: str,
-        quality: str, region_count: int, summary: str | None,
+        quality: str, region_count: int, summary: str | None, mask_hash: str = "", method: str = "",
     ) -> ComparisonRecord:
         """Karşılaştırma kaydı ekler."""
         with self._tx():
-            cur = self._con.execute(
-                """INSERT INTO comparisons(folder_id, before_image_id, after_image_id, result_dir,
-                   quality, region_count, summary, created_at) VALUES (?,?,?,?,?,?,?,?)""",
-                (folder_id, before_image_id, after_image_id, result_dir, quality, region_count,
-                 summary, _now()),
+            return self._insert_comparison(
+                folder_id, before_image_id, after_image_id, result_dir, quality, region_count, summary,
+                mask_hash, method,
             )
-            new_id = int(cur.lastrowid)
-        return self.get_comparison(new_id)  # type: ignore[return-value]
+
+    def _insert_comparison(
+        self, folder_id, before_image_id, after_image_id, result_dir, quality, region_count, summary,
+        mask_hash, method,
+    ) -> ComparisonRecord:
+        cur = self._con.execute(
+            """INSERT INTO comparisons(folder_id, before_image_id, after_image_id, result_dir,
+               quality, region_count, summary, created_at, mask_hash, method) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (folder_id, before_image_id, after_image_id, result_dir, quality, region_count,
+             summary, _now(), mask_hash, method),
+        )
+        return self.get_comparison(int(cur.lastrowid))  # type: ignore[return-value]
+
+    def upsert_comparison(
+        self, folder_id: int | None, before_image_id: int, after_image_id: int, new_result_dir: str,
+        quality: str, region_count: int, summary: str | None, mask_hash: str = "", method: str = "",
+    ) -> tuple[ComparisonRecord, bool]:
+        """(önce, sonra) çifti için kaydı TEK transaction içinde ekler ya da günceller.
+
+        Çift için kayıt varsa güncellenir (mevcut `result_dir` korunur; maske/yöntem yeni değerlere
+        geçer). Yoksa `new_result_dir` ile eklenir. Eşzamanlı çağrılar tek satır üretir.
+
+        Returns:
+            (kayıt, yeni_mi)
+        """
+        with self._tx():
+            row = self._con.execute(
+                """SELECT id FROM comparisons WHERE before_image_id = ? AND after_image_id = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (before_image_id, after_image_id),
+            ).fetchone()
+            if row is None:
+                rec = self._insert_comparison(
+                    folder_id, before_image_id, after_image_id, new_result_dir, quality, region_count,
+                    summary, mask_hash, method)
+                return rec, True
+            self._con.execute(
+                """UPDATE comparisons SET folder_id=?, quality=?, region_count=?, summary=?, created_at=?,
+                   mask_hash=?, method=? WHERE id=?""",
+                (folder_id, quality, region_count, summary, _now(), mask_hash, method, row["id"]),
+            )
+            return self.get_comparison(int(row["id"])), False  # type: ignore[return-value]
 
     def update_comparison(
-        self, comparison_id: int, quality: str, region_count: int, summary: str | None
+        self, comparison_id: int, quality: str, region_count: int, summary: str | None,
+        mask_hash: str | None = None, method: str | None = None,
     ) -> None:
         """Mevcut karşılaştırma özetini günceller (ör. AI yorumu sonradan geldiğinde)."""
         with self._tx():
@@ -374,6 +451,10 @@ class LibraryRepository:
                 "UPDATE comparisons SET quality=?, region_count=?, summary=?, created_at=? WHERE id=?",
                 (quality, region_count, summary, _now(), comparison_id),
             )
+            if mask_hash is not None:
+                self._con.execute("UPDATE comparisons SET mask_hash=? WHERE id=?", (mask_hash, comparison_id))
+            if method is not None:
+                self._con.execute("UPDATE comparisons SET method=? WHERE id=?", (method, comparison_id))
 
     def get_comparison(self, comparison_id: int) -> ComparisonRecord | None:
         """Karşılaştırma kaydı; yoksa None."""
@@ -381,26 +462,56 @@ class LibraryRepository:
             row = self._con.execute("SELECT * FROM comparisons WHERE id = ?", (comparison_id,)).fetchone()
         return _comparison(row) if row else None
 
-    def find_comparison(self, before_image_id: int, after_image_id: int) -> ComparisonRecord | None:
-        """Aynı (önce, sonra) çifti için kaydedilmiş en yeni karşılaştırma."""
+    def find_comparison(
+        self, before_image_id: int, after_image_id: int, mask_hash: str | None = None
+    ) -> ComparisonRecord | None:
+        """Aynı (önce, sonra) çifti için kaydedilmiş en yeni karşılaştırma.
+
+        `mask_hash` verilirse yalnızca O maskeyle hesaplanmış kayıt döner (önbellek anahtarı);
+        "" = maskesiz. None = maskeye bakma.
+        """
+        sql = "SELECT * FROM comparisons WHERE before_image_id = ? AND after_image_id = ?"
+        args: list[object] = [before_image_id, after_image_id]
+        if mask_hash is not None:
+            sql += " AND mask_hash = ?"
+            args.append(mask_hash)
         with self._lock:
-            row = self._con.execute(
-                """SELECT * FROM comparisons WHERE before_image_id = ? AND after_image_id = ?
-                   ORDER BY id DESC LIMIT 1""",
-                (before_image_id, after_image_id),
-            ).fetchone()
+            row = self._con.execute(sql + " ORDER BY id DESC LIMIT 1", args).fetchone()
         return _comparison(row) if row else None
 
-    def list_comparisons(self, folder_id: int | None = None) -> list[ComparisonRecord]:
-        """Karşılaştırma geçmişi (yeniden eskiye). `folder_id` verilirse alt klasörler dahil."""
-        sql, args = "SELECT * FROM comparisons", []
+    def list_comparisons(
+        self, folder_id: int | None = None, search: str = "", sort: str = "newest"
+    ) -> list[ComparisonRecord]:
+        """Karşılaştırma geçmişi. `folder_id` verilirse alt klasörler dahil.
+
+        Args:
+            folder_id: Karşılaştırmanın kayıtlı olduğu (önce görüntüsünün) klasörü; None = hepsi.
+            search: Görüntü adları, klasör adı ya da özet metninde geçen metin.
+            sort: "newest" (yeni→eski, varsayılan), "oldest", "regions" (bölge sayısı, çoktan aza).
+        """
+        sql = (
+            "SELECT c.* FROM comparisons c"
+            " JOIN images b ON b.id = c.before_image_id"
+            " JOIN images a ON a.id = c.after_image_id"
+            " LEFT JOIN folders f ON f.id = c.folder_id WHERE 1=1"
+        )
+        args: list[object] = []
         if folder_id is not None:
             ids = self.descendant_ids(folder_id)
-            sql += f" WHERE folder_id IN ({','.join('?' * len(ids))})"
-            args = list(ids)
-        sql += " ORDER BY created_at DESC, id DESC"
+            sql += f" AND c.folder_id IN ({','.join('?' * len(ids))})"
+            args += ids
+        if search.strip():
+            esc = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            sql += (" AND (b.original_name LIKE ? ESCAPE '\\' OR a.original_name LIKE ? ESCAPE '\\'"
+                    " OR c.summary LIKE ? ESCAPE '\\' OR f.name LIKE ? ESCAPE '\\')")
+            args += [f"%{esc}%"] * 4
+        order = {
+            "newest": "c.created_at DESC, c.id DESC",
+            "oldest": "c.created_at ASC, c.id ASC",
+            "regions": "c.region_count DESC, c.created_at DESC, c.id DESC",
+        }.get(sort, "c.created_at DESC, c.id DESC")
         with self._lock:
-            rows = self._con.execute(sql, args).fetchall()
+            rows = self._con.execute(f"{sql} ORDER BY {order}", args).fetchall()
         return [_comparison(r) for r in rows]
 
     def delete_comparison(self, comparison_id: int) -> list[str]:
@@ -421,10 +532,15 @@ class _Tx:
 
     def __enter__(self) -> None:
         self._repo._lock.acquire()
-        self._depth = getattr(self._repo, "_tx_depth", 0)
-        if self._depth == 0:
-            self._repo._con.execute("BEGIN")
-        self._repo._tx_depth = self._depth + 1  # type: ignore[attr-defined]
+        try:
+            self._depth = getattr(self._repo, "_tx_depth", 0)
+            if self._depth == 0:
+                self._repo._con.execute("BEGIN")
+            self._repo._tx_depth = self._depth + 1  # type: ignore[attr-defined]
+        except BaseException:
+            # `__exit__` çağrılmayacağı için kilit burada bırakılır (aksi halde diğer thread'ler kilitlenir).
+            self._repo._lock.release()
+            raise
 
     def __exit__(self, exc_type, exc, tb) -> None:
         try:

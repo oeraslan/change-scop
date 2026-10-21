@@ -29,6 +29,25 @@ HEAT_FLOOR = 0.08      # normalize değerin altı tamamen saydam
 HEAT_FULL = 0.45       # bunun üstü tam opak (katman opaklığı ayrıca ~%50)
 
 
+HEAT_MIN_AREA_PX = 25      # özgün çözünürlükte bundan küçük sıcak noktalar (ağaç kenarı vb.) bastırılır
+
+
+def suppress_small_hotspots(norm: np.ndarray, floor: float, min_area: float) -> np.ndarray:
+    """`floor` üstündeki bağlı bileşenlerden alanı `min_area` pikselden küçük olanları sıfırlar."""
+    if min_area <= 1:
+        return norm
+    hot = (norm > floor).astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(hot, connectivity=8)
+    if n <= 1:
+        return norm
+    small = np.flatnonzero(stats[1:, cv2.CC_STAT_AREA] < min_area) + 1
+    if small.size == 0:
+        return norm
+    out = norm.copy()
+    out[np.isin(labels, small)] = 0.0
+    return out
+
+
 def heatmap_to_qimage(change_map: np.ndarray, max_side: int = 2048) -> QImage:
     """0..1 `change_map`'i renk haritalı (TURBO) RGBA ısı haritasına çevirir.
 
@@ -37,11 +56,13 @@ def heatmap_to_qimage(change_map: np.ndarray, max_side: int = 2048) -> QImage:
     """
     cm = np.clip(np.nan_to_num(change_map.astype(np.float32)), 0.0, 1.0)
     h, w = cm.shape[:2]
+    k = 1.0
     if max(h, w) > max_side:
         k = max_side / max(h, w)
         cm = cv2.resize(cm, (max(1, int(w * k)), max(1, int(h * k))), interpolation=cv2.INTER_AREA)
     top = max(float(np.percentile(cm, 99.5)), 0.25)
     norm = np.clip(cm / top, 0.0, 1.0)
+    norm = suppress_small_hotspots(norm, HEAT_FLOOR, HEAT_MIN_AREA_PX * k * k)
     bgr = cv2.applyColorMap((norm * 255).astype(np.uint8), cv2.COLORMAP_TURBO)
     alpha = np.clip((norm - HEAT_FLOOR) / (HEAT_FULL - HEAT_FLOOR), 0.0, 1.0)
     rgba = np.dstack([cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), alpha * 255]).astype(np.uint8)

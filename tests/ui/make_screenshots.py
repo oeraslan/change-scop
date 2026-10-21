@@ -115,6 +115,42 @@ def main(argv: list[str] | None = None) -> int:
     shot(win, out, "07_karsilastirma_isi_haritasi.png")
     cv.heat_switch.setChecked(False)
 
+    # Yok sayma maskesi: düzenleme modu (çizilmiş maskeyle)
+    cv.group.fit_all()
+    cv.enter_mask_mode()
+    wait_until(lambda: not cv._mask_workers)
+    items = sorted(cv.before_view.region_items(), key=lambda i: i.region_id)
+    cv.mask_editor.brush_px = 60
+    for item in items[-1:]:                                  # son bölge: "gölge/bulut" gibi yok sayılacak alan
+        r = item.spec.rect
+        cv.mask_editor.stroke([(r.left() + 10, r.center().y()), (r.center().x(), r.center().y() - 8),
+                               (r.right() - 10, r.center().y() + 10)])
+    cv.mask_editor.brush_px = 90
+    cv.mask_editor.stroke([(60, 70), (180, 60), (300, 90)])
+    cv.mask_editor.brush_px = 40
+    cv.mask_editor.tool = "eraser"
+    cv.mask_editor.stroke([(120, 65)])
+    cv.mask_editor.tool = "brush"
+    wait(300)
+    shot(win, out, "17_maske_duzenleme.png")
+    # Kaydet ve yeniden karşılaştır → maskeli sonuç
+    cv.save_mask_and_recompare()
+    wait_until(lambda: not cv.mask_mode_active())
+    wait(300)
+    wait_until(lambda: not cv.is_busy() and cv._result is not None)
+    wait(900)
+    shot(win, out, "18_maskeli_karsilastirma.png")
+
+    # Geçmiş sekmesine birkaç kayıt daha ekle
+    for fname in ("Güney Vadi", "Z Limanı"):
+        folder = next(f for f in library.repo.list_folders() if f.name == fname)
+        imgs = library.repo.list_images(folder.id)
+        if len(imgs) >= 2:
+            win.open_compare(imgs[0], imgs[1])
+            wait(300)
+            wait_until(lambda: not cv.is_busy() and cv._result is not None)
+            wait(600)
+
     # AI paneli boş durum (LLM yok): kayıtlı sonucu CV-only haliyle göster
     import copy
 
@@ -139,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Geçmiş sekmesi
     win.switchTo(lv)
+    lv.tree.select_folder(None)
     lv.show_tab("history")
     wait(400)
     shot(win, out, "09_gecmis_karsilastirmalar.png")
@@ -164,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
     shot(win, out, "14_hizalama_basarisiz.png")
 
     win.switchTo(win.settings_view)
+    win._reconfigure_enabled = False        # demo pipeline'ı ezilmesin
+    win.settings_view.method_combo.setCurrentIndex(2)
     wait(300)
     shot(win, out, "11_ayarlar.png")
 
