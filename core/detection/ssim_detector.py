@@ -16,6 +16,7 @@ from core.contracts import (
     DetectionResult,
     RegistrationResult,
 )
+from core.detection.dinov2_features import Dinov2Extractor, Dinov2Unavailable
 from core.detection.normalize import normalize_pair
 
 log = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ CHROMA_DEADZONE = 12.0   # bu kadar a/b farkı sıkıştırma/ışık gürültü
 CHROMA_SCALE = 30.0      # deadzone üstünde bu kadar fark -> terim azami
 
 
-MIN_AREA_FRACTION = 4e-4   # geçerli alanın bu oranı: min bölge alanı (config değeri alt sınır)
+MIN_AREA_FRACTION = 4e-4   # geçerli alanın bu oranı: min bölge alanı; YALNIZCA çalışma küçültmesi varken uygulanır
 SCALE_COMPENSATE_FROM = 1.2   # etkin büyütme bu değerin üstündeyse çözünürlük eşitlenir
 MAX_REGIONS_RELIABLE = 40  # bundan fazla bölge -> sonuç güvenilmez işaretlenir
 THRESHOLD_SCALE_GAIN = 0.08  # çözünürlük farkı büyüdükçe taban eşik (1 + gain*(s-1)) kadar yükselir
@@ -64,20 +65,49 @@ def estimate_scale(homography: np.ndarray | None, shape: tuple[int, int]) -> flo
     return float(np.clip(1.0 / np.sqrt(det), 1.0 / 16.0, 16.0))
 
 
+FUSION_GATE = 0.4      # birleşimde DINOv2 skoru bu değere ulaşınca SSIM'e tam güven
+FUSION_FLOOR = 0.25    # DINOv2 skoru 0 iken birleşik skor çarpanı
+DINO_PREBLUR = 1.0     # DINOv2 girdisine uygulanan Gaussian sigma (px, çalışma çözünürlüğünde)
+DINO_SMOOTH = 7.0      # kalibrasyondan önce ham mesafe haritasına Gaussian sigma (px): yalıtılmış patch aykırılarını söndürür
+DINO_DEADZONE = 0.15   # medyan üstü bu kadar mesafe doku/ton gürültüsü sayılır
+DINO_SCALE = 0.35      # deadzone üstünde bu kadar mesafe -> 1.0
+
+
+def calibrate_dino(raw: np.ndarray, region: np.ndarray, params: dict | None = None) -> np.ndarray:
+    """Ham cosine distance'ı 0..1 değişiklik skoruna çevirir.
+
+    Taban `region` içindeki medyan (sahnenin genel doku/ton kayması çıkarılır); sabit ölçek
+    kullanılır, böylece değişiklik olmayan çiftte gürültü büyütülmez.
+    """
+    if DINO_SMOOTH > 0:
+        raw = cv2.GaussianBlur(raw, (0, 0), DINO_SMOOTH)
+    base = float(np.median(raw[region])) if region.any() else 0.0
+    out = np.clip((raw - base - DINO_DEADZONE) / DINO_SCALE, 0.0, 1.0).astype(np.float32)
+    if params is not None:
+        params["dinov2_base_distance"] = round(base, 4)
+        params["dinov2_smooth_px"] = DINO_SMOOTH
+        params["dinov2_preblur"] = DINO_PREBLUR
+        params["dinov2_deadzone"] = DINO_DEADZONE
+        params["dinov2_scale"] = DINO_SCALE
+    return out
+
+
 def _odd(n: int, minimum: int = 3) -> int:
     n = max(int(n), minimum)
     return n if n % 2 == 1 else n + 1
 
 
 class SsimChangeDetector:
-    """SSIM + ışık normalizasyonu + eşikleme/morfoloji/connected components.
+    """SSIM / DINOv2 / birleşik değişiklik tespiti + eşikleme/morfoloji/connected components.
 
-    Faz 1'de yalnızca SSIM vardır; `method` "dinov2" veya "ssim+dinov2" istenirse SSIM'e
-    düşülür ve bu `params` içinde belirtilir.
+    `method` "dinov2" veya "ssim+dinov2" istenip model yüklenemezse SSIM'e düşülür ve bu
+    `params["fallback_reason"]` ile `DetectionResult.method` içinde görünür. Thread-safe: aynı
+    örnek birden çok thread'den çağrılabilir; `release()` çalışan çıkarımı bekler.
     """
 
     def __init__(self, config: AppConfig | None = None) -> None:
         self._config = config or AppConfig()
+        self._dino = Dinov2Extractor(self._config)
 
     @property
     def cfg(self) -> DetectionConfig:
@@ -85,7 +115,8 @@ class SsimChangeDetector:
         return self._config.detection
 
     def release(self) -> None:
-        """Model belleğini bırakır (Faz 1'de tutulan model yok; no-op)."""
+        """DINOv2 modelini bellekten/VRAM'den bırakır. Sonraki `detect()` modeli tekrar yükler."""
+        self._dino.release()
 
     # ------------------------------------------------------------------
     def detect(self, registration: RegistrationResult) -> DetectionResult:
@@ -121,27 +152,68 @@ class SsimChangeDetector:
         params["registration_scale"] = round(scale, 3)
         params["working_scale"] = round(work, 3)
         params["working_downscale"] = round(1.0 / work, 3)
-        min_area = max(int(c.min_region_area_px), int(round(MIN_AREA_FRACTION * float(valid.sum()))))
+        # Alan tabanı yalnızca çalışma küçültmesi varken yükselir (küçültmede JPEG/ölçek artıkları
+        # büyük lekeler bırakır). Çözünürlük farkı yoksa config değeri tek taban: büyük görüntüde
+        # küçük ama belirgin nesne kaçmaz.
+        min_area = int(c.min_region_area_px)
+        if work > 1.0:
+            min_area = max(min_area, int(round(MIN_AREA_FRACTION * float(valid.sum()))))
         params["min_region_area_effective_px"] = min_area
         params["min_region_area_fraction"] = MIN_AREA_FRACTION
-        if c.method != "ssim":
-            params["fallback_reason"] = "dinov2 henüz uygulanmadı (Faz 2); SSIM kullanıldı"
+        use_ssim = c.method in ("ssim", "ssim+dinov2")
+        use_dino = c.method in ("dinov2", "ssim+dinov2")
+        if use_dino:
+            ok, why = self._dino.available()
+            if not ok:
+                use_dino, use_ssim = False, True
+                params["fallback_reason"] = why
 
         # Geçerli alan: kenar erozyonu + SSIM penceresinin kenara taşan etkisi
         erode = int(c.edge_erode_px) + int(np.ceil((_odd(c.ssim_window) // 2 + 2) * work))
         safe = self._erode(valid, erode)
         params["effective_erode_px"] = erode
 
+        h, w = before.shape[:2]
         if work > 1.0:
-            h, w = before.shape[:2]
             size = (max(int(round(w / work)), 8), max(int(round(h / work)), 8))
             b_s = cv2.resize(before, size, interpolation=cv2.INTER_AREA)
             a_s = cv2.resize(after, size, interpolation=cv2.INTER_AREA)
             v_s = cv2.resize(valid.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST).astype(bool)
-            small = self._ssim_change_map(b_s, a_s, v_s, params)
-            change = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+            safe_s = cv2.resize(safe.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST).astype(bool)
         else:
-            change = self._ssim_change_map(before, after, valid, params)
+            b_s, a_s, v_s, safe_s = before, after, valid, safe
+
+        ssim_map = self._ssim_change_map(b_s, a_s, v_s, params) if use_ssim else None
+        dino_map = None
+        if use_dino:
+            try:
+                dino_map = self._dino_change_map(b_s, a_s, v_s, safe_s, params)
+            except Dinov2Unavailable as exc:
+                params["fallback_reason"] = str(exc)
+                if ssim_map is None:
+                    ssim_map = self._ssim_change_map(b_s, a_s, v_s, params)
+        if ssim_map is not None and dino_map is not None:
+            ws, wd = max(float(c.ssim_weight), 0.0), max(float(c.dinov2_weight), 0.0)
+            if ws + wd <= 0:
+                ws, wd = 0.5, 0.5
+            ws, wd = ws / (ws + wd), wd / (ws + wd)
+            params["ssim_weight_used"] = round(ws, 4)
+            params["dinov2_weight_used"] = round(wd, 4)
+            mixed = ws * ssim_map + wd * dino_map
+            # DINOv2 anlamsal "değişmedi" diyorsa (doku/ton/gölge) yapısal SSIM farkı bastırılır
+            agree = np.clip(dino_map / FUSION_GATE, 0.0, 1.0)
+            small = np.clip(mixed * (FUSION_FLOOR + (1.0 - FUSION_FLOOR) * agree), 0.0, 1.0).astype(np.float32)
+            params["fusion_gate"] = FUSION_GATE
+            params["fusion_floor"] = FUSION_FLOOR
+            method_used = "ssim+dinov2"
+        elif dino_map is not None:
+            small, method_used = dino_map, "dinov2"
+        else:
+            small, method_used = ssim_map, "ssim"
+        if "fallback_reason" in params:
+            params["fell_back"] = 1
+        params["method_used"] = method_used
+        change = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR) if work > 1.0 else small
         change[~safe] = 0.0
 
         mask = self._threshold(change, safe, params)
@@ -155,7 +227,7 @@ class SsimChangeDetector:
             params["unreliable_reason"] = "Otsu çok düşük veya aşırı bölge sayısı (çözünürlük/ışık uyumsuzluğu olabilir)"
         else:
             params["unreliable"] = 0
-        return DetectionResult(change_map=change, regions=regions, method="ssim", params=params)
+        return DetectionResult(change_map=change, regions=regions, method=method_used, params=params)
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -195,6 +267,22 @@ class SsimChangeDetector:
             params["chroma_deadzone"] = CHROMA_DEADZONE
             change = np.maximum(change, chroma.astype(np.float32))
         return cv2.GaussianBlur(change, (0, 0), 1.5)
+
+    def _dino_change_map(self, before: np.ndarray, after: np.ndarray, valid: np.ndarray,
+                         safe: np.ndarray, params: dict) -> np.ndarray:
+        """DINOv2 patch cosine distance -> 0..1 değişiklik haritası (aynı ışık normalizasyonundan sonra)."""
+        c = self.cfg
+        b, a = normalize_pair(before, after, valid, c.light_normalization)
+        a = np.where(valid[..., None], a, b)
+        if DINO_PREBLUR > 0:    # tane/JPEG farkı patch özniteliklerini bozmasın
+            b = cv2.GaussianBlur(b, (0, 0), DINO_PREBLUR)
+            a = cv2.GaussianBlur(a, (0, 0), DINO_PREBLUR)
+        raw = self._dino.distance_map(b, a, int(c.dinov2_tile_px), bool(c.dinov2_fp16), params)
+        params["dinov2_tile_px"] = int(c.dinov2_tile_px)
+        params["dinov2_fp16"] = int(bool(c.dinov2_fp16))
+        out = calibrate_dino(raw, safe, params)
+        out[~valid] = 0.0
+        return out
 
     def _threshold(self, change: np.ndarray, safe: np.ndarray, params: dict) -> np.ndarray:
         c = self.cfg
