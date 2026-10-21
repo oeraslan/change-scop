@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from skimage.metrics import structural_similarity
 
-from core.config import AppConfig, DetectionConfig
+from core.config import AppConfig, DetectionConfig, resolve_device
 from core.contracts import (
     AlignmentQuality,
     BoundingBox,
@@ -28,6 +28,8 @@ CHROMA_SCALE = 30.0      # deadzone üstünde bu kadar fark -> terim azami
 
 
 MIN_AREA_FRACTION = 4e-4   # geçerli alanın bu oranı: min bölge alanı; YALNIZCA çalışma küçültmesi varken uygulanır
+SMALL_AREA_FRACTION = 4e-4   # küçük görüntülerde min alan = min(config, bu oran x geçerli alan)
+MIN_AREA_FLOOR_PX = 35       # mutlak alt sınır
 SCALE_COMPENSATE_FROM = 1.2   # etkin büyütme bu değerin üstündeyse çözünürlük eşitlenir
 MAX_REGIONS_RELIABLE = 40  # bundan fazla bölge -> sonuç güvenilmez işaretlenir
 THRESHOLD_SCALE_GAIN = 0.08  # çözünürlük farkı büyüdükçe taban eşik (1 + gain*(s-1)) kadar yükselir
@@ -161,12 +163,25 @@ class SsimChangeDetector:
         # büyük lekeler bırakır). Çözünürlük farkı yoksa config değeri tek taban: büyük görüntüde
         # küçük ama belirgin nesne kaçmaz.
         min_area = int(c.min_region_area_px)
+        n_valid = float(valid.sum())
         if work > 1.0:
-            min_area = max(min_area, int(round(MIN_AREA_FRACTION * float(valid.sum()))))
+            min_area = max(min_area, int(round(MIN_AREA_FRACTION * n_valid)))
+        else:
+            # Küçük görüntüde sabit taban orantısız: geçerli alanla ölçekle (büyükte config geçerli)
+            min_area = min(min_area, max(MIN_AREA_FLOOR_PX, int(round(SMALL_AREA_FRACTION * n_valid))))
+        # sensitivity 0.5 -> x1.0, 1.0 -> x0.5, 0.0 -> x1.5
+        sens = float(np.clip(c.sensitivity, 0.0, 1.0))
+        min_area = max(MIN_AREA_FLOOR_PX, int(round(min_area * (1.5 - sens)))) if min_area > MIN_AREA_FLOOR_PX             else max(int(round(MIN_AREA_FLOOR_PX * (1.5 - sens))), 20)
         params["min_region_area_effective_px"] = min_area
         params["min_region_area_fraction"] = MIN_AREA_FRACTION
         use_ssim = c.method in ("ssim", "ssim+dinov2")
         use_dino = c.method in ("dinov2", "ssim+dinov2")
+        device = resolve_device(self._config.runtime.device)
+        params["device"] = device
+        if use_dino and device == "cpu" and c.method == AppConfig().detection.method:
+            # Kullanıcı yöntemi varsayılandan değiştirmediyse CPU'da DINOv2 (~+24 s) atlanır
+            use_dino, use_ssim = False, True
+            params["fallback_reason"] = "CPU: DINOv2 hız için devre dışı"
         if use_dino:
             ok, why = self._dino.available()
             if not ok:
