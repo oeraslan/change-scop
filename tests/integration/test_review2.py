@@ -279,10 +279,6 @@ def test_shutdown_during_running_comparison_is_safe(default_pipeline_state, race
     assert "error" not in out2 and out2["result"].detection is not None
 
 
-@pytest.mark.xfail(strict=True, reason="configure/shutdown_default_pipeline, çalışan karşılaştırma varken "
-                   "DefaultRegistrar._lock yüzünden hizalama bitene kadar (CPU'da onlarca sn) ÇAĞIRANI bloklar. "
-                   "UI ertelemesi bunu gizliyor; core düzeyinde release() kilit beklememeli (ör. çalışırken "
-                   "'release istendi' bayrağı koyup register() sonunda bırakmalı).")
 def test_configure_does_not_block_caller_for_the_whole_registration(default_pipeline_state, race_files,
                                                                     slow_register) -> None:
     """Çağıran (UI thread'i olabilir) 1 sn'den fazla bloklanmamalı."""

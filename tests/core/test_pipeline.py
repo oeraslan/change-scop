@@ -280,3 +280,59 @@ def test_configure_and_shutdown_default_pipeline(monkeypatch):
         assert cp._default_pipeline is None
     finally:
         set_default_pipeline(None)
+
+
+def test_retire_while_running_defers_release_to_end_of_run():
+    rec = Recorder()
+    pipe = _pipeline(rec)
+    pipe.config.runtime.release_cv_models_before_llm = False   # sadece retire kaynaklı release'i gör
+    started, proceed = threading.Event(), threading.Event()
+    original = pipe.registrar.register
+
+    def slow_register(b, a):
+        started.set()
+        proceed.wait(10)
+        return original(b, a)
+
+    pipe.registrar.register = slow_register
+    t = threading.Thread(target=lambda: pipe.run(*_inputs(), None, use_llm=False))
+    t.start()
+    assert started.wait(10)
+    assert pipe.retire() is False                     # meşgul → beklemeden döner
+    assert "release:registrar" not in rec.events
+    proceed.set()
+    t.join(10)
+    assert "release:registrar" in rec.events          # koşu bitince bırakıldı
+
+
+def test_retire_when_idle_releases_immediately():
+    rec = Recorder()
+    pipe = _pipeline(rec)
+    assert pipe.retire() is True
+    assert "release:detector" in rec.events
+
+
+def test_ignore_mask_removed_from_valid_mask_before_detection():
+    rec = Recorder()
+    pipe = _pipeline(rec)
+    seen: list[np.ndarray] = []
+    original = pipe.detector.detect
+
+    def capture(registration):
+        seen.append(registration.valid_mask.copy())
+        return original(registration)
+
+    pipe.detector.detect = capture
+    mask = np.zeros((64, 64), bool)        # farklı çözünürlük: 32x32 valid_mask'a ölçeklenir
+    mask[:32, :] = True                    # üst yarıyı yok say
+    pipe.run(*_inputs(), None, use_llm=False, ignore_mask=mask)
+    assert not seen[0][:16].any() and seen[0][16:].all()
+
+
+def test_ignore_mask_must_be_2d():
+    from core.pipeline import apply_ignore_mask
+
+    rec = Recorder()
+    reg = FakeRegistrar(rec).register(*[FakePreprocessor(rec).prepare(i) for i in _inputs()])
+    with pytest.raises(ValueError):
+        apply_ignore_mask(reg, np.zeros((4, 4, 3), bool))

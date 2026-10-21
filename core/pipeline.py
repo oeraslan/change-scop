@@ -21,8 +21,11 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
+
+import cv2
+import numpy as np
 
 from core.config import AppConfig, load_config
 from core.contracts import (
@@ -109,6 +112,21 @@ def free_gpu_memory() -> None:
         torch.cuda.empty_cache()
 
 
+def apply_ignore_mask(registration: RegistrationResult, ignore_mask: np.ndarray) -> RegistrationResult:
+    """`ignore_mask` (True = yok say) alanını `valid_mask`'tan çıkarılmış yeni bir sonuç döndürür.
+
+    Maske herhangi bir çözünürlükte olabilir; `valid_mask` boyutuna en yakın komşu ile ölçeklenir.
+    Orijinal `registration` değiştirilmez.
+    """
+    mask = np.asarray(ignore_mask)
+    if mask.ndim != 2 or mask.size == 0:
+        raise ValueError(f"ignore_mask 2 boyutlu olmalı, gelen şekil: {mask.shape}")
+    h, w = registration.valid_mask.shape
+    if mask.shape != (h, w):
+        mask = cv2.resize(mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+    return replace(registration, valid_mask=registration.valid_mask & ~mask.astype(bool))
+
+
 def _noop_progress(stage: str, fraction: float, message: str = "") -> None:
     return None
 
@@ -140,6 +158,10 @@ class Pipeline:
             self.config = load_config()
         self._analyst: RegionAnalyst | None = None
         self._analyst_lock = threading.Lock()
+        # Emekliye ayırma: configure/shutdown çağıranı çalışan koşuyu beklemez (bkz. `retire`).
+        self._state_lock = threading.Lock()
+        self._active_runs = 0
+        self._retired = False
 
     # -- LLM ---------------------------------------------------------------
 
@@ -176,6 +198,20 @@ class Pipeline:
             except Exception:
                 log.exception("Analist kapatılamadı")
 
+    def retire(self) -> bool:
+        """Pipeline'ı kullanımdan kaldırır; çağıranı ASLA çalışan bir koşu kadar bekletmez.
+
+        Çalışan koşu yoksa kaynaklar hemen bırakılır (`True`). Varsa son koşu bittiğinde, o koşunun
+        thread'inde bırakılır (`False`). Emekli bir pipeline'da yeni `run` yine çalışır (modeller lazy
+        yeniden yüklenir) ve bittiğinde tekrar bırakılır.
+        """
+        with self._state_lock:
+            self._retired = True
+            idle = self._active_runs == 0
+        if idle:
+            self.shutdown()
+        return idle
+
     # -- Ana akış ----------------------------------------------------------
 
     def run(
@@ -185,6 +221,7 @@ class Pipeline:
         progress: ProgressCallback | None = None,
         use_llm: bool = False,
         cancel: threading.Event | None = None,
+        ignore_mask: np.ndarray | None = None,
     ) -> ComparisonResult:
         """İki görüntüyü karşılaştırır.
 
@@ -195,6 +232,10 @@ class Pipeline:
                 çağrılır; UI tarafı sinyal ile ana thread'e aktarmalıdır.
             use_llm: True ise ve LLM ayarlarda açıksa bölgeler yorumlanır ve özet üretilir.
             cancel: Set edilirse aşamalar arasında `ComparisonCancelled` fırlatılır.
+            ignore_mask: Opsiyonel HxW bool maske, True = "bu alanı yok say". before görüntüsünün
+                ekranda gösterilen (EXIF yönü düzeltilmiş) hali üzerinde, herhangi bir çözünürlükte
+                çizilir; hizalama çözünürlüğüne yeniden ölçeklenir ve `valid_mask`'tan çıkarılır, yani
+                o pikseller asla değişiklik sayılmaz. Hizalamayı etkilemez.
 
         Returns:
             `ComparisonResult`. Hizalama FAILED ise `detection=None`.
@@ -203,6 +244,26 @@ class Pipeline:
             ComparisonCancelled: `cancel` set edildiğinde.
             Exception: Ön işleme/hizalama/tespit hataları (ör. bozuk dosya) çağırana iletilir.
         """
+        with self._state_lock:
+            self._active_runs += 1
+        try:
+            return self._run(before, after, progress, use_llm, cancel, ignore_mask)
+        finally:
+            with self._state_lock:
+                self._active_runs -= 1
+                release_now = self._retired and self._active_runs == 0
+            if release_now:
+                self.shutdown()
+
+    def _run(
+        self,
+        before: ImageInput,
+        after: ImageInput,
+        progress: ProgressCallback | None,
+        use_llm: bool,
+        cancel: threading.Event | None,
+        ignore_mask: np.ndarray | None,
+    ) -> ComparisonResult:
         assert self.config is not None
         report = progress or _noop_progress
         llm_wanted = use_llm and self.config.llm.enabled and self.analyst_factory is not None
@@ -226,6 +287,8 @@ class Pipeline:
             if registration.quality is AlignmentQuality.FAILED:
                 log.warning("Hizalama başarısız; tespit atlandı. Notlar: %s", registration.notes)
             else:
+                if ignore_mask is not None:
+                    registration = apply_ignore_mask(registration, ignore_mask)
                 stage(STAGE_DETECT)
                 detection = self.detector.detect(registration)
         finally:
@@ -316,26 +379,28 @@ def configure_default_pipeline(config: AppConfig) -> None:
     """Ayarlar değişince çağrılır: eski pipeline'ı kapatır, yenisini `config` ile kurar.
 
     Modeller lazy yüklendiği için bu çağrı hızlıdır; bir sonraki karşılaştırma modelleri yeniden yükler.
-    Bir karşılaştırma çalışırken çağrılmamalıdır (UI, worker bitene kadar ertelemelidir).
+    Karşılaştırma çalışırken de güvenle çağrılabilir ve onu BEKLEMEZ: çalışan koşu eski ayarla biter,
+    eski pipeline'ın kaynakları o koşu bitince bırakılır.
     """
     global _default_pipeline, _default_config
     with _default_lock:
         old, _default_pipeline = _default_pipeline, None
         _default_config = config
     if old is not None:
-        old.shutdown()
+        old.retire()   # çalışan koşu varsa onu beklemez; koşu bitince bırakılır
 
 
 def shutdown_default_pipeline() -> None:
     """Uygulama kapanırken çağrılır: modelleri bırakır ve (Faz 3) llama-server'ı sonlandırır.
 
-    Pipeline hiç kurulmadıysa hiçbir şey yapmaz (kapanışta model yüklemez).
+    Pipeline hiç kurulmadıysa hiçbir şey yapmaz (kapanışta model yüklemez). Çalışan karşılaştırma
+    varsa onu beklemez; kaynaklar o koşu bitince bırakılır (çağıran iptal + kısa bekleme yapmalıdır).
     """
     global _default_pipeline
     with _default_lock:
         old, _default_pipeline = _default_pipeline, None
     if old is not None:
-        old.shutdown()
+        old.retire()   # çalışan koşu varsa onu beklemez; koşu bitince bırakılır
 
 
 def get_default_pipeline() -> Pipeline:
@@ -354,9 +419,10 @@ def run_comparison(
     progress: ProgressCallback,
     use_llm: bool,
     cancel: threading.Event | None = None,
+    ignore_mask: np.ndarray | None = None,
 ) -> ComparisonResult:
     """UI'ın çağırdığı tek fonksiyon. Arka plan thread'inde çağrılmalıdır (UI thread'inde DEĞİL).
 
     Ayrıntılar için `Pipeline.run`.
     """
-    return get_default_pipeline().run(before, after, progress, use_llm, cancel)
+    return get_default_pipeline().run(before, after, progress, use_llm, cancel, ignore_mask)
