@@ -318,6 +318,7 @@ class MaskToolbar(Surface):
         super().__init__(parent)
         title = StrongBodyLabel("Yok sayma maskesi", self)
         hint = CaptionLabel("Karşılaştırmaya katılmayacak alanları boya (bulut, su yüzeyi, park alanı…). "
+                            "Maskeyi nesnenin kenarından biraz geniş çiz (~30 px). "
                             "Tekerlek: yakınlaştır · Orta tuş / Boşluk + sürükle: kaydır", self)
         hint.setTextColor(QColor(0, 0, 0, 140), QColor(255, 255, 255, 150))
         self.tools = SegmentedWidget(self)

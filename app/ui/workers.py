@@ -22,7 +22,7 @@ PREVIEW_MAX_SIDE = 3000
 def load_preview(path: Path, max_side: int = PREVIEW_MAX_SIDE) -> QImage | None:
     """Büyük dosyaları ölçekleyerek okuyan önizleme yükleyici (worker thread'inde çağrılır)."""
     reader = QImageReader(str(path))
-    reader.setAutoTransform(False)
+    reader.setAutoTransform(True)       # EXIF yönü (küçük resim/ön işlemeyle tutarlı)
     size = reader.size()
     if size.isValid() and max(size.width(), size.height()) > max_side:
         k = max_side / max(size.width(), size.height())
@@ -73,7 +73,12 @@ class ComparisonWorker(QThread):
         if self._force or not self._use_cache:
             return None
         # Önbellek anahtarı maske özetini içerir: maske değiştiyse eski sonuç bulunmaz.
-        cached = self._library.find_comparison(self._before_rec, self._after_rec)
+        # ... ve İSTENEN fark yöntemini (fallback'te sonsuz yeniden hesaplama olmasın diye istenen yöntem).
+        try:
+            method = core_pipeline.get_default_pipeline().config.detection.method
+        except Exception:  # noqa: BLE001
+            method = None
+        cached = self._library.find_comparison(self._before_rec, self._after_rec, method)
         if cached is None:
             return None
         try:

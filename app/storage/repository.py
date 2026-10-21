@@ -335,6 +335,8 @@ class LibraryRepository:
             if self.get_folder(folder_id) is None:
                 raise KeyError(f"Hedef klasör yok: {folder_id}")
             self._con.execute("UPDATE images SET folder_id = ? WHERE id = ?", (folder_id, image_id))
+            # Karşılaştırmanın klasörü "önce" görüntüsünün klasörüdür: geçmiş görüntüyle birlikte taşınır.
+            self._con.execute("UPDATE comparisons SET folder_id = ? WHERE before_image_id = ?", (folder_id, image_id))
 
     def update_image(
         self, image_id: int, captured_at: str | None = None, source: str | None = None
@@ -441,6 +443,33 @@ class LibraryRepository:
             )
             return self.get_comparison(int(row["id"])), False  # type: ignore[return-value]
 
+    def replace_comparison(
+        self, folder_id: int | None, before_image_id: int, after_image_id: int, new_result_dir: str,
+        quality: str, region_count: int, summary: str | None, mask_hash: str = "", method: str = "",
+    ) -> tuple[ComparisonRecord, str | None]:
+        """Çift için kaydı (result_dir + mask_hash + method dahil) TEK transaction'da yeni sonuca çevirir.
+
+        Dosyalar `new_result_dir` altına ÖNCEDEN yazılmış olmalıdır. Eski sonuç dizini (varsa) döner;
+        silmek çağıranın işidir.
+        """
+        with self._tx():
+            row = self._con.execute(
+                """SELECT id, result_dir FROM comparisons WHERE before_image_id = ? AND after_image_id = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (before_image_id, after_image_id),
+            ).fetchone()
+            if row is None:
+                rec = self._insert_comparison(
+                    folder_id, before_image_id, after_image_id, new_result_dir, quality, region_count,
+                    summary, mask_hash, method)
+                return rec, None
+            self._con.execute(
+                """UPDATE comparisons SET folder_id=?, result_dir=?, quality=?, region_count=?, summary=?,
+                   created_at=?, mask_hash=?, method=? WHERE id=?""",
+                (folder_id, new_result_dir, quality, region_count, summary, _now(), mask_hash, method, row["id"]),
+            )
+            return self.get_comparison(int(row["id"])), row["result_dir"]  # type: ignore[return-value]
+
     def update_comparison(
         self, comparison_id: int, quality: str, region_count: int, summary: str | None,
         mask_hash: str | None = None, method: str | None = None,
@@ -463,7 +492,8 @@ class LibraryRepository:
         return _comparison(row) if row else None
 
     def find_comparison(
-        self, before_image_id: int, after_image_id: int, mask_hash: str | None = None
+        self, before_image_id: int, after_image_id: int, mask_hash: str | None = None,
+        method: str | None = None,
     ) -> ComparisonRecord | None:
         """Aynı (önce, sonra) çifti için kaydedilmiş en yeni karşılaştırma.
 
@@ -475,6 +505,9 @@ class LibraryRepository:
         if mask_hash is not None:
             sql += " AND mask_hash = ?"
             args.append(mask_hash)
+        if method is not None:
+            sql += " AND method = ?"
+            args.append(method)
         with self._lock:
             row = self._con.execute(sql + " ORDER BY id DESC LIMIT 1", args).fetchone()
         return _comparison(row) if row else None

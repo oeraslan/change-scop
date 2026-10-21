@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from app.storage.models import ComparisonRecord, Folder, ImageRecord
 from app.storage.repository import LibraryRepository
@@ -94,10 +94,12 @@ def file_date(path: Path) -> datetime:
 
 def make_thumbnail(src: Path, dst: Path, size: int = THUMB_SIZE) -> tuple[int, int]:
     """`src` görüntüsünden `size` px'e sığan JPEG thumbnail üretir; (genişlik, yükseklik) döndürür."""
-    with Image.open(src) as img:
-        width, height = img.size
-        img.draft("RGB", (size * 2, size * 2))
-        img = img.convert("RGB")
+    with Image.open(src) as raw:
+        width, height = raw.size
+        if raw.getexif().get(0x0112, 1) in (5, 6, 7, 8):     # EXIF yönü 90 derece döndürür: boyut yer değiştirir
+            width, height = height, width
+        raw.draft("RGB", (size * 2, size * 2))
+        img = ImageOps.exif_transpose(raw).convert("RGB")
         img.thumbnail((size, size), Image.Resampling.LANCZOS)
         dst.parent.mkdir(parents=True, exist_ok=True)
         img.save(dst, "JPEG", quality=88)
@@ -213,14 +215,16 @@ class Library:
 
     # -- karşılaştırma sonuçları --------------------------------------------
 
-    def find_comparison(self, before: ImageRecord, after: ImageRecord) -> ComparisonRecord | None:
+    def find_comparison(
+        self, before: ImageRecord, after: ImageRecord, method: str | None = None,
+    ) -> ComparisonRecord | None:
         """Aynı çift VE aynı "önce" maskesi için kaydedilmiş sonuç var mı?
 
         Önbellek anahtarı = (önce, sonra, önce görüntüsünün güncel maske özeti). `before` bayat bir
         kayıt olabileceğinden maske özeti veritabanından yeniden okunur; maske değiştiyse eski sonuç
         kullanılmaz.
         """
-        rec = self.repo.find_comparison(before.id, after.id, self.current_mask_hash(before))
+        rec = self.repo.find_comparison(before.id, after.id, self.current_mask_hash(before), method)
         if rec is not None and not (self.abs_path(rec.result_dir) / "meta.json").is_file():
             return None
         return rec
@@ -246,14 +250,25 @@ class Library:
             mask_hash = self.current_mask_hash(before)
         quality = result.registration.quality.value
         n_regions = len(result.detection.regions) if result.detection else 0
-        method = result.detection.method if result.detection else ""
-        rec, _created = self.repo.upsert_comparison(
-            before.folder_id, before.id, after.id, f"results/{uuid.uuid4().hex[:12]}", quality, n_regions,
-            result.summary, mask_hash, method,
-        )
+        method = ""
+        if result.detection:
+            method = str(result.detection.params.get("method_requested") or result.detection.method)
+        # Sonuç YENİ dizine yazılır; satır (result_dir + mask_hash + method) dosyalar bittikten sonra tek
+        # transaction'da güncellenir. Böylece okuyucu hiçbir zaman yarım/karışık sonuç görmez.
+        new_dir = f"results/{uuid.uuid4().hex[:12]}"
         with self._write_lock:
-            _write_result(self.abs_path(rec.result_dir), result)
-        return self.repo.get_comparison(rec.id)  # type: ignore[return-value]
+            try:
+                _write_result(self.abs_path(new_dir), result)
+                rec, old_dir = self.repo.replace_comparison(
+                    before.folder_id, before.id, after.id, new_dir, quality, n_regions,
+                    result.summary, mask_hash, method,
+                )
+            except Exception:
+                shutil.rmtree(self.abs_path(new_dir), ignore_errors=True)
+                raise
+        if old_dir and old_dir != new_dir:
+            shutil.rmtree(self.abs_path(old_dir), ignore_errors=True)
+        return rec
 
     # -- yok sayma maskesi ---------------------------------------------------
 

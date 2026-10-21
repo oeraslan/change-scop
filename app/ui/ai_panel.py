@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEasingCurve, QRectF, Qt, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QStackedLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QStackedLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -30,6 +30,20 @@ from core.contracts import AlignmentQuality, ChangeRegion, ChangeVerdict, Compar
 
 CARD_W, CARD_H = 248, 198
 THUMB_W, THUMB_H = 108, 72
+
+
+class _HScrollArea(QScrollArea):
+    """Yalnızca yatay kayan alan: normal tekerlek ve Shift+tekerlek yatay kaydırır."""
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        bar = self.horizontalScrollBar()
+        if bar.maximum() <= 0:
+            event.ignore()
+            return
+        delta = event.angleDelta()
+        d = delta.x() or delta.y()
+        bar.setValue(bar.value() - d)
+        event.accept()
 
 
 class SkeletonBar(QWidget):
@@ -239,8 +253,8 @@ class AiPanel(Surface):
             self.top_stack.addWidget(page)
 
         # Kartlar
-        self.scroll = SingleDirectionScrollArea(self, Qt.Orientation.Horizontal)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll = _HScrollArea(self)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll.setWidgetResizable(True)
         self.cards_host = QWidget()
@@ -249,8 +263,16 @@ class AiPanel(Surface):
         self.cards_layout.setSpacing(12)
         self.cards_layout.addStretch(1)
         self.scroll.setWidget(self.cards_host)
-        self.scroll.enableTransparentBackground()
-        self.scroll.setFixedHeight(CARD_H + 8)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setStyleSheet(
+            "QScrollArea{background:transparent;border:none;}"
+            "QScrollArea>QWidget>QWidget{background:transparent;}"
+            "QScrollBar:horizontal{height:8px;background:transparent;margin:0 2px;}"
+            "QScrollBar::handle:horizontal{background:rgba(148,163,184,150);border-radius:4px;min-width:40px;}"
+            "QScrollBar::handle:horizontal:hover{background:rgba(148,163,184,220);}"
+            "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{width:0;}"
+            "QScrollBar::add-page:horizontal,QScrollBar::sub-page:horizontal{background:transparent;}")
+        self.scroll.setFixedHeight(CARD_H + 8 + 12)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 12, 16, 12)
@@ -405,7 +427,7 @@ class AiPanel(Surface):
         for rid, card in self._cards.items():
             card.set_selected(rid == region_id)
         card = self._cards.get(region_id) if region_id is not None else None
-        if card is not None and card.isVisible():
+        if card is not None and not card.isHidden():
             self.scroll.ensureWidgetVisible(card, 24, 0)
 
     def selected_card_id(self) -> int | None:

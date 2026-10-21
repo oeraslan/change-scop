@@ -176,6 +176,11 @@ class SyncGraphicsView(QGraphicsView):
         self._region_layer = _Layer()
         self._region_layer.setZValue(2)
         self._scene.addItem(self._region_layer)
+        self._invalid_layer = _Layer()          # valid_mask dışı (karşılaştırılamayan) alan; "Farkları göster" ile açılır
+        self._invalid_layer.setZValue(1.5)
+        self._invalid_layer.setVisible(False)
+        self._scene.addItem(self._invalid_layer)
+        self._invalid_item: QGraphicsPixmapItem | None = None
         self._region_items: dict[int, RegionItem] = {}
         self._regions_visible = True
         self._hidden_verdicts: set[ChangeVerdict] = set()
@@ -286,6 +291,28 @@ class SyncGraphicsView(QGraphicsView):
         self._apply_verdict_filter()
         self._region_layer.setVisible(self._regions_visible and bool(specs))
 
+    def set_invalid_overlay(self, image: QImage | None) -> None:
+        """Karşılaştırılamayan alan katmanını (RGBA: koyu + çapraz tarama) ayarlar; None → kaldırır."""
+        if self._invalid_item is not None:
+            self._scene.removeItem(self._invalid_item)
+            self._invalid_item = None
+        if image is None or image.isNull():
+            self._invalid_layer.setVisible(False)
+            return
+        item = QGraphicsPixmapItem(QPixmap.fromImage(image), self._invalid_layer)
+        if not self._image_rect.isEmpty() and image.width():
+            item.setScale(self._image_rect.width() / image.width())
+        item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        item.setAcceptHoverEvents(False)
+        self._invalid_item = item
+        self._invalid_layer.setOpacity(1.0 if self._regions_visible else 0.0)
+        self._invalid_layer.setVisible(self._regions_visible)
+
+    def invalid_overlay_visible(self) -> bool:
+        """Karşılaştırılamayan alan işareti şu an görünür mü?"""
+        return (self._invalid_item is not None and self._invalid_layer.isVisible()
+                and self._invalid_layer.opacity() > 0)
+
     def region_items(self) -> list[RegionItem]:
         return list(self._region_items.values())
 
@@ -301,6 +328,8 @@ class SyncGraphicsView(QGraphicsView):
     def set_regions_visible(self, visible: bool, animate: bool = True) -> None:
         """"Farkları göster": kapalıyken hiçbir kutu/numara görünmez."""
         self._regions_visible = visible
+        if self._invalid_item is not None:
+            self._fade_item("invalid", self._invalid_layer, 1.0 if visible else 0.0, animate)
         if not self._region_items:
             self._region_layer.setVisible(False)
             return
@@ -686,10 +715,13 @@ class SyncGroup(QObject):
 
     def fit_all(self) -> None:
         """Hepsini sığdır (ilk görünümden eşleri takip eder)."""
-        if self._views:
-            for v in self._views:
+        from shiboken6 import isValid
+
+        views = [v for v in self._views if isValid(v)]      # ertelenmiş çağrı pencere kapandıktan sonra gelebilir
+        if views:
+            for v in views:
                 v.fit(emit=False)
-            self._propagate(self._views[0])
+            self._propagate(views[0])
 
     def highlight(self, region_id: int | None) -> None:
         for v in self._views:
