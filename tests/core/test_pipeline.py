@@ -336,3 +336,91 @@ def test_ignore_mask_must_be_2d():
     reg = FakeRegistrar(rec).register(*[FakePreprocessor(rec).prepare(i) for i in _inputs()])
     with pytest.raises(ValueError):
         apply_ignore_mask(reg, np.zeros((4, 4, 3), bool))
+
+
+class ServerAnalyst(FakeAnalyst):
+    """Sunucu durumu ve ilerleme kancası olan sahte analist."""
+
+    def __init__(self, rec: Recorder) -> None:
+        super().__init__(rec)
+        self.is_server_running = False
+        self.progress_callback = None
+        self.seen_regions: list = []
+
+    def analyze(self, registration, detection):
+        self.is_server_running = True
+        self.seen_regions = detection.regions
+        if self.progress_callback:
+            self.progress_callback(0, len(detection.regions), "Yapay zekâ modeli yükleniyor…")
+            for i in range(len(detection.regions)):
+                self.progress_callback(i + 1, len(detection.regions), "")
+        return super().analyze(registration, detection)
+
+    def release(self) -> None:
+        self.rec.events.append("release:llm")
+        self.is_server_running = False
+
+
+def test_on_cv_result_called_before_llm_and_not_mutated():
+    rec = Recorder()
+    analyst = ServerAnalyst(rec)
+    partial: list = []
+
+    def on_cv(res):
+        rec.events.append("partial")
+        partial.append(res)
+
+    result = _pipeline(rec, analyst=analyst).run(*_inputs(), None, use_llm=True, on_cv_result=on_cv)
+    assert rec.events.index("partial") < rec.events.index("llm:analyze")
+    assert partial[0].llm_used is False
+    # Kısmi sonuçtaki bölgeler LLM tarafından değiştirilmedi (kopya üzerinde çalışıldı)
+    assert all(r.verdict is ChangeVerdict.UNREVIEWED for r in partial[0].detection.regions)
+    assert all(r.verdict is ChangeVerdict.REAL_CHANGE for r in result.detection.regions)
+
+
+def test_on_cv_result_not_called_without_llm():
+    rec = Recorder()
+    called: list = []
+    _pipeline(rec, analyst=FakeAnalyst(rec)).run(*_inputs(), None, use_llm=False, on_cv_result=called.append)
+    assert called == []
+
+
+def test_llm_server_released_before_next_cv_step():
+    rec = Recorder()
+    analyst = ServerAnalyst(rec)
+    pipe = _pipeline(rec, analyst=analyst)
+    pipe.run(*_inputs(), None, use_llm=True)
+    assert analyst.is_server_running
+    rec.events.clear()
+    pipe.run(*_inputs(), None, use_llm=False)
+    assert rec.events.index("release:llm") < rec.events.index("register")
+
+
+def test_region_progress_forwarded():
+    rec = Recorder()
+    msgs: list[tuple[str, float, str]] = []
+    _pipeline(rec, analyst=ServerAnalyst(rec)).run(
+        *_inputs(), lambda s, f, m="": msgs.append((s, f, m)), use_llm=True)
+    llm = [(f, m) for s, f, m in msgs if s == "llm_analyze"]
+    assert any("yükleniyor" in m for _, m in llm)
+    fr = [f for f, _ in llm]
+    assert fr == sorted(fr) and len(fr) >= 3
+
+
+def test_interpret_runs_only_llm():
+    rec = Recorder()
+    analyst = ServerAnalyst(rec)
+    pipe = _pipeline(rec, analyst=analyst)
+    cv = pipe.run(*_inputs(), None, use_llm=False)
+    rec.events.clear()
+    out = pipe.interpret(cv)
+    assert "register" not in rec.events and "detect" not in rec.events
+    assert out.llm_used and out.summary
+    assert all(r.verdict is ChangeVerdict.UNREVIEWED for r in cv.detection.regions)   # girdi korunur
+
+
+def test_interpret_without_llm_returns_input():
+    rec = Recorder()
+    pipe = _pipeline(rec)
+    cv = pipe.run(*_inputs(), None, use_llm=False)
+    assert pipe.interpret(cv) is cv
