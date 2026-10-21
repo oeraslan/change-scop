@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -98,9 +99,10 @@ AnalystFactory = Callable[[], RegionAnalyst]
 def free_gpu_memory() -> None:
     """Python çöpünü toplar ve CUDA varsa PyTorch önbellek VRAM'ini işletim sistemine iade eder."""
     gc.collect()
-    try:
-        import torch
-    except ImportError:
+    # torch hiç yüklenmediyse boşaltılacak VRAM yoktur; import'u (worker thread'inde saniyeler
+    # sürebilir) tetikleme.
+    torch = sys.modules.get("torch")
+    if torch is None:
         return
     if torch.cuda.is_available():
         torch.cuda.synchronize()
