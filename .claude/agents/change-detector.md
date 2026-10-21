@@ -29,6 +29,13 @@ Sen değişiklik tespiti (change detection) uzmanı bir bilgisayarlı görü mü
    Bölgeleri score'a göre azalan sırala, `region_id` 1'den başlasın.
 7. Tüm eşikler/parametreler `DetectionResult.params` içine yazılsın (tekrarlanabilirlik).
 
+## DINOv2 yükleme (Faz 0'da doğrulandı)
+- Ağırlık: `AppConfig().paths.dinov2_weights` (`dinov2_vits14_pretrain.pth`).
+- Mimari kodu: `AppConfig().paths.dinov2_source_dir` (sabit commit'teki facebookresearch/dinov2).
+  `sys.path`'e ekleyip `from dinov2.hub.backbones import dinov2_vits14; m = dinov2_vits14(pretrained=False)`,
+  sonra `m.load_state_dict(torch.load(..., map_location="cpu", weights_only=True))`. `torch.hub.load`
+  KULLANMA. `forward_features(x)["x_norm_patchtokens"]` → (1, N, 384); girdi kenarları 14'ün katı.
+
 ## Donanım / VRAM kuralları (RTX 2060, 6 GB)
 - Cihaz `core/config.py`'deki ayardan gelir (`"auto"` → CUDA varsa `cuda`, yoksa `cpu`).
   **CUDA yoksa her şey CPU'da çalışmalı.**

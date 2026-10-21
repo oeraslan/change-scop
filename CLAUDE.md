@@ -12,7 +12,7 @@ Aynı bölgenin farklı zamanlarda (ör. 1 hafta arayla), farklı açılardan ve
   Sistemde varsayılan Python 3.14'tür; bu proje SADECE `.venv` (3.12) ile çalışır. Tüm komutlar
   `.venv\Scripts\python.exe -m ...` ile çalıştırılır, sistemdeki `python`/`pip` asla kullanılmaz.
 - Modüller birbirine **sadece `core/contracts.py`** üzerinden bağlanır. Bir modül başka bir modülün iç
-  fonksiyonlarını import etmez. Sözleşmede değişiklik gerekiyorsa değiştirme; gerekçesiyle raporla,
+  fonksiyonlarını import etmez. Ayarlar için `core/config.py` (salt okunur) import edilebilir. Sözleşmede değişiklik gerekiyorsa değiştirme; gerekçesiyle raporla,
   karar ana oturumda verilir.
 - Her public fonksiyon type hint'li ve docstring'li olur. Her modülün `tests/<modül>/` altında pytest testleri olur.
 - Ağır işlemler (model yükleme, eşleştirme, LLM çağrısı) UI thread'inde ÇALIŞMAZ.
@@ -43,6 +43,7 @@ PNG/JPG yükleme → Ön işleme → Eşleştirme (LightGlue) → Hizalama (homo
 ```
 core/
   contracts.py        # Modüller arası veri sözleşmesi (TEK doğruluk kaynağı)
+  config.py           # Tüm ayarlar (yollar, eşikler, cihaz, LLM model tablosu); modüller SADECE okur
   registration/       # image-registration ajanı
   detection/          # change-detector ajanı
   llm/                # llm-analyst ajanı
@@ -55,7 +56,8 @@ models/               # Offline model dosyaları (git'e girmez)
   lightglue/  superpoint/  dinov2/  gemma/
 bin/llama/            # llama-server.exe ve DLL'leri (git'e girmez)
 scripts/
-  download_models.py  # Geliştirme sırasında modelleri indirir
+  download_models.py  # Geliştirme sırasında modelleri + llama.cpp'yi indirir (--only, --list, devam ettirme)
+  make_synthetic_pair.py  # tests/data/synthetic/ için önce/sonra çifti + doğruluk verisi üretir
 tests/
   data/               # Örnek görüntü çiftleri
 ```

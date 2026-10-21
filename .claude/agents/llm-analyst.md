@@ -30,6 +30,10 @@ Sen yerel LLM entegrasyonu konusunda uzman bir Python mühendisisin.
   güvenlik payı düşüldükten sonra kalan VRAM / (GGUF boyutu / katman sayısı). Gemma 4 12B Q4 (~7 GB)
   6 GB'a tam sığmaz → kısmi offload. E4B tamamen sığar. Config'de tam sayı verilmişse onu kullan.
   CUDA/NVIDIA yoksa `-ngl 0` (tamamen CPU). Seçilen değeri log'a yaz.
+- Dosya boyutları (Faz 0): 12B gguf 6.5 GiB + mmproj 0.16 GiB; E4B gguf 4.8 GiB + mmproj 0.92 GiB.
+  Windows masaüstü ~1 GB VRAM kullandığı için boş VRAM ~5 GB'tır; E4B'nin "tam sığması" llama.cpp'nin
+  per-layer embedding'leri CPU'da tutmasına bağlıdır → gerçek VRAM kullanımını ölç ve "auto" hesabını
+  buna göre kalibre et (gerekirse `mmproj_offload=False`). Sabit tahmine güvenme.
 - **Lazy başlatma:** llama-server uygulama açılışında DEĞİL, ilk `analyze()`/`summarize()` ihtiyacında
   başlatılır. `is_available()` sunucuyu başlatmaz; sadece exe + model dosyalarının varlığını kontrol eder.
 - CV modelleriyle aynı anda VRAM'de olmaz: pipeline, LLM adımından önce CV modellerini boşaltır.

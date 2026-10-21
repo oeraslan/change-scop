@@ -28,6 +28,19 @@ Sen bilgisayarlı görü ve görüntü kaydı (image registration) uzmanı bir P
 6. **Kalite:** inlier sayısı/oranı ve reprojeksiyon hatasına göre GOOD / WEAK / FAILED belirle.
    Eşikleri modül başında sabit olarak tanımla ve docstring'de açıkla.
 
+## ⚠ lightglue paketi ve offline kuralı (Faz 0'da doğrulandı)
+- `lightglue.SuperPoint.__init__` ağırlıkları **koşulsuz** `torch.hub.load_state_dict_from_url(...)` ile
+  GitHub'dan indirir; `LightGlue(features="superpoint")` da aynı şekilde indirir. Doğrudan kullanmak YASAK.
+- Çözüm: Model kurulurken `torch.hub.load_state_dict_from_url`'yi `unittest.mock.patch` ile yerel bir
+  yükleyiciye yönlendir: URL'deki dosya adını (`superpoint_v1.pth`, `superpoint_lightglue*.pth`)
+  `core.config.AppConfig().paths.superpoint_weights` / `.lightglue_weights` ile eşle, `torch.load(...,
+  map_location="cpu", weights_only=True)` ile yükle; dosya yoksa `FileNotFoundError` fırlat (asla ağa çıkma)
+  → SIFT fallback. Böylece LightGlue kendi anahtar yeniden adlandırmasını (`self_attn.N` →
+  `transformers.N.self_attn`) kendisi yapar.
+- Testlerde ağı kapat (ör. `socket.socket.connect`'i monkeypatch'le hata fırlatacak şekilde) ve model
+  yüklemenin yine de çalıştığını doğrula. Faz 0 ölçümü: sentetik çiftte 1116 eşleşme, 783 inlier,
+  köşe hatası 0.77 px, tepe VRAM ~450 MB (RTX 2060).
+
 ## Donanım / VRAM kuralları (RTX 2060, 6 GB)
 - Cihaz `core/config.py`'deki ayardan gelir (`"auto"` → CUDA varsa `cuda`, yoksa `cpu`).
   **CUDA yoksa her şey CPU'da çalışmalı**; CUDA'ya özgü hiçbir çağrı koşulsuz yapılmaz.

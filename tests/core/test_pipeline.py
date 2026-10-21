@@ -1,0 +1,249 @@
+"""core/pipeline.py testleri — sahte (fake) bileşenlerle, model gerektirmez."""
+
+from __future__ import annotations
+
+import threading
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from core.config import AppConfig
+from core.contracts import (
+    AlignmentQuality,
+    BoundingBox,
+    ChangeRegion,
+    ChangeVerdict,
+    DetectionResult,
+    ImageInput,
+    PreparedImage,
+    RegistrationResult,
+)
+from core.pipeline import (
+    STAGE_DONE,
+    STAGE_LLM_ANALYZE,
+    STAGE_RELEASE,
+    ComparisonCancelled,
+    Pipeline,
+    run_comparison,
+    set_default_pipeline,
+)
+
+
+class Recorder:
+    """Çağrı sırasını kaydeder (VRAM kuralını doğrulamak için)."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+
+class FakePreprocessor:
+    def __init__(self, rec: Recorder) -> None:
+        self.rec = rec
+
+    def prepare(self, image: ImageInput) -> PreparedImage:
+        self.rec.events.append(f"prepare:{image.path.name}")
+        return PreparedImage(image, np.zeros((32, 32, 3), np.uint8), 1.0, False)
+
+
+class FakeRegistrar:
+    def __init__(self, rec: Recorder, quality: AlignmentQuality = AlignmentQuality.GOOD) -> None:
+        self.rec = rec
+        self.quality = quality
+
+    def register(self, before: PreparedImage, after: PreparedImage) -> RegistrationResult:
+        self.rec.events.append("register")
+        return RegistrationResult(
+            before=before, after_warped=after.pixels, valid_mask=np.ones((32, 32), bool),
+            homography=None if self.quality is AlignmentQuality.FAILED else np.eye(3),
+            num_matches=100, num_inliers=80, reprojection_error_px=0.5, quality=self.quality,
+        )
+
+    def release(self) -> None:
+        self.rec.events.append("release:registrar")
+
+
+class FakeDetector:
+    def __init__(self, rec: Recorder, n_regions: int = 2) -> None:
+        self.rec = rec
+        self.n_regions = n_regions
+
+    def detect(self, registration: RegistrationResult) -> DetectionResult:
+        self.rec.events.append("detect")
+        regions = [
+            ChangeRegion(i + 1, BoundingBox(0, 0, 4, 4), np.ones((4, 4), bool), 0.9, 16)
+            for i in range(self.n_regions)
+        ]
+        return DetectionResult(np.zeros((32, 32), np.float32), regions, "ssim")
+
+    def release(self) -> None:
+        self.rec.events.append("release:detector")
+
+
+class FakeAnalyst:
+    def __init__(self, rec: Recorder, available: bool = True, fail: bool = False) -> None:
+        self.rec = rec
+        self.available = available
+        self.fail = fail
+
+    def is_available(self) -> bool:
+        return self.available
+
+    def analyze(self, registration: RegistrationResult, detection: DetectionResult) -> DetectionResult:
+        self.rec.events.append("llm:analyze")
+        if self.fail:
+            raise RuntimeError("sunucu çöktü")
+        for r in detection.regions:
+            r.verdict = ChangeVerdict.REAL_CHANGE
+            r.description = "yeni yapı"
+        return detection
+
+    def summarize(self, registration: RegistrationResult, detection: DetectionResult) -> str | None:
+        self.rec.events.append("llm:summarize")
+        return "Merkezde yeni bir yapı var."
+
+
+def _inputs() -> tuple[ImageInput, ImageInput]:
+    return ImageInput(Path("before.png")), ImageInput(Path("after.jpg"))
+
+
+def _pipeline(rec: Recorder, *, quality=AlignmentQuality.GOOD, analyst=None, n_regions=2,
+              factory_calls: list | None = None) -> Pipeline:
+    def factory():
+        if factory_calls is not None:
+            factory_calls.append(1)
+        rec.events.append("llm:factory")
+        return analyst
+
+    return Pipeline(
+        preprocessor=FakePreprocessor(rec),
+        registrar=FakeRegistrar(rec, quality),
+        detector=FakeDetector(rec, n_regions),
+        analyst_factory=factory if analyst is not None else None,
+        config=AppConfig(),
+    )
+
+
+def test_cv_only_flow_releases_models_and_reports_progress():
+    rec = Recorder()
+    progress: list[tuple[str, float]] = []
+    result = _pipeline(rec).run(*_inputs(), lambda s, f, m="": progress.append((s, f)), use_llm=False)
+
+    assert result.detection is not None and len(result.detection.regions) == 2
+    assert result.llm_used is False and result.summary is None
+    assert rec.events[:4] == ["prepare:before.png", "prepare:after.jpg", "register", "detect"]
+    assert {"release:registrar", "release:detector"} <= set(rec.events)
+    fractions = [f for _, f in progress]
+    assert fractions == sorted(fractions) and progress[-1] == (STAGE_DONE, 1.0)
+
+
+def test_llm_runs_only_after_cv_models_released():
+    rec = Recorder()
+    result = _pipeline(rec, analyst=FakeAnalyst(rec)).run(*_inputs(), None, use_llm=True)
+
+    assert result.llm_used is True
+    assert result.summary == "Merkezde yeni bir yapı var."
+    assert all(r.verdict is ChangeVerdict.REAL_CHANGE for r in result.detection.regions)
+    last_release = max(i for i, e in enumerate(rec.events) if e.startswith("release:"))
+    first_llm = min(i for i, e in enumerate(rec.events) if e.startswith("llm:"))
+    assert last_release < first_llm, rec.events
+
+
+def test_analyst_is_created_lazily_and_cached():
+    rec = Recorder()
+    calls: list[int] = []
+    pipe = _pipeline(rec, analyst=FakeAnalyst(rec), factory_calls=calls)
+
+    pipe.run(*_inputs(), None, use_llm=False)
+    assert calls == []                                   # LLM istenmedi → hiç oluşturulmadı
+    pipe.run(*_inputs(), None, use_llm=True)
+    pipe.run(*_inputs(), None, use_llm=True)
+    assert calls == [1]                                  # bir kez oluşturuldu, sonra önbellekten
+
+
+def test_llm_disabled_in_config_skips_llm():
+    rec = Recorder()
+    pipe = _pipeline(rec, analyst=FakeAnalyst(rec))
+    pipe.config.llm.enabled = False
+    result = pipe.run(*_inputs(), None, use_llm=True)
+    assert result.llm_used is False
+    assert not any(e.startswith("llm:") for e in rec.events)
+
+
+def test_failed_alignment_skips_detection_and_llm():
+    rec = Recorder()
+    result = _pipeline(rec, quality=AlignmentQuality.FAILED, analyst=FakeAnalyst(rec)).run(
+        *_inputs(), None, use_llm=True)
+    assert result.detection is None and result.llm_used is False
+    assert "detect" not in rec.events
+    assert not any(e.startswith("llm:") for e in rec.events)
+
+
+def test_no_regions_skips_llm():
+    rec = Recorder()
+    result = _pipeline(rec, analyst=FakeAnalyst(rec), n_regions=0).run(*_inputs(), None, use_llm=True)
+    assert result.llm_used is False
+    assert "llm:analyze" not in rec.events
+
+
+@pytest.mark.parametrize("analyst_kwargs", [{"available": False}, {"fail": True}])
+def test_llm_unavailable_or_failing_keeps_cv_result(analyst_kwargs):
+    rec = Recorder()
+    result = _pipeline(rec, analyst=FakeAnalyst(rec, **analyst_kwargs)).run(*_inputs(), None, use_llm=True)
+    assert result.llm_used is False and result.summary is None
+    assert result.detection is not None
+    assert all(r.verdict is ChangeVerdict.UNREVIEWED for r in result.detection.regions)
+
+
+def test_factory_exception_is_tolerated():
+    rec = Recorder()
+    pipe = _pipeline(rec)
+
+    def broken():
+        raise FileNotFoundError("llama-server.exe yok")
+
+    pipe.analyst_factory = broken
+    result = pipe.run(*_inputs(), None, use_llm=True)
+    assert result.llm_used is False and result.detection is not None
+
+
+def test_cancel_raises_and_still_releases():
+    rec = Recorder()
+    cancel = threading.Event()
+
+    def progress(stage, fraction, message=""):
+        if stage == "register":
+            cancel.set()
+
+    pipe = _pipeline(rec)
+    # İptal, register aşaması bildirildikten SONRA bir sonraki aşama sınırında gerçekleşir.
+    with pytest.raises(ComparisonCancelled):
+        pipe.run(*_inputs(), progress, use_llm=False, cancel=cancel)
+    assert "detect" not in rec.events
+    assert "release:detector" in rec.events
+
+
+def test_errors_propagate_but_release_happens():
+    rec = Recorder()
+    pipe = _pipeline(rec)
+
+    def boom(_):
+        raise ValueError("bozuk görüntü")
+
+    pipe.registrar.register = lambda b, a: boom(b)
+    stages: list[str] = []
+    with pytest.raises(ValueError):
+        pipe.run(*_inputs(), lambda s, f, m="": stages.append(s), use_llm=False)
+    assert STAGE_RELEASE in stages and "release:detector" in rec.events
+
+
+def test_run_comparison_uses_default_pipeline():
+    rec = Recorder()
+    set_default_pipeline(_pipeline(rec, analyst=FakeAnalyst(rec)))
+    try:
+        stages: list[str] = []
+        result = run_comparison(*_inputs(), lambda s, f, m="": stages.append(s), use_llm=True)
+        assert result.llm_used is True
+        assert STAGE_LLM_ANALYZE in stages
+    finally:
+        set_default_pipeline(None)

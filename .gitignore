@@ -11,3 +11,4 @@ bin/llama/*
 !bin/llama/.gitkeep
 *.sqlite3
 .pytest_cache/
+tests/data/synthetic/
