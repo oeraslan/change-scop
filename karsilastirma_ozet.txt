@@ -1,0 +1,8 @@
+Z Limanı
+========================================
+Hizalama: good (386/505 eşleşme)
+Bölge sayısı: 2
+
+Kuzeydoğuda yeni bir yapı inşa edilmiş, yol kenarındaki araç artık yok. Batıdaki farklar gölge ve parlaklık kaynaklı olup gerçek değişiklik değildir.
+  #1 [Gerçek değişiklik] Yeni bir yapı ya da nesne eklenmiş görünüyor.
+  #2 [Gerçek değişiklik] Bir nesne kaybolmuş ya da yer değiştirmiş.

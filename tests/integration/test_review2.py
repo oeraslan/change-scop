@@ -137,10 +137,6 @@ def test_20px_object_found_under_scale_compensation(scale, real_pipeline, tmp_pa
     assert _large_extra(result, [c]) == 0
 
 
-@pytest.mark.xfail(strict=True, reason="min bölge alanı tabanı (4e-4 x geçerli alan) çözünürlük FARKI olmayan "
-                   "büyük görüntülerde de uygulanıyor: 3200x2400 same-res çiftte 40 px (görüntü genişliğinin %1.25'i) "
-                   "nesne kaçıyor (taban 3072 px; config tabanı 400). Taban yalnızca working_scale>1 iken "
-                   "yükseltilmeli ya da 1.0 ölçekte config değeri kullanılmalı.")
 def test_40px_object_in_3200x2400_same_resolution_pair_is_found(real_pipeline, tmp_path) -> None:
     """Aynı çözünürlük, büyük görüntü: 40x40 px belirgin (kırmızı) nesne bölge olmalı."""
     before, after, c = _tiny_pair(1.0, 40, width=3200, height=2400, same_res=True)
