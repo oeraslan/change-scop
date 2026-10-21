@@ -23,10 +23,7 @@ SCENARIOS: dict[str, PairParams] = {
     "birleşik(s7,0.6,20°,jpeg50)": PairParams(seed=7, scale=0.6, rotate_deg=20.0, jpeg_quality=50),
 }
 
-_XFAIL_SPURIOUS = {
-    "ölçek0.5": "Çözünürlük farkı (after 2x büyütülüyor) telafi edilmiyor: onlarca sahte bölge",
-    "ölçek0.4": "Çözünürlük farkı (after 2.5x büyütülüyor) telafi edilmiyor: yüzlerce sahte bölge",
-}
+_XFAIL_SPURIOUS: dict[str, str] = {}   # Çözünürlük farkı Faz 1 düzeltme turunda giderildi
 
 _CACHE: dict = {}
 
@@ -69,7 +66,6 @@ def test_light_only_pair_has_no_regions(real_pipeline, tmp_path_factory) -> None
     assert result.detection is not None and result.detection.regions == []
 
 
-@pytest.mark.xfail(strict=True, reason="Güçlü ışık farkı (-35/x0.85) + JPEG 50 + 20° dönmede 3 küçük (400-650 px) sahte bölge çıkıyor")
 def test_strong_light_shift_with_rotation_has_no_regions(real_pipeline, tmp_path_factory) -> None:
     """Güçlü ışık farkı + 20° dönme + JPEG 50: yine bölge yok."""
     params = PairParams(n_new_objects=0, brightness=-35.0, contrast=0.85, rotate_deg=20.0, jpeg_quality=50)
