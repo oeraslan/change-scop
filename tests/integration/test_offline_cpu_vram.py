@@ -14,18 +14,37 @@ from scripts.make_synthetic_pair import PairParams, make_pair
 from tests.integration.helpers import evaluate, record, write_pair
 
 
+_LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+
+
+def _host_of(value) -> str | None:  # noqa: ANN001
+    if isinstance(value, tuple) and value:
+        return str(value[0])
+    if isinstance(value, (str, bytes)):
+        return value.decode() if isinstance(value, bytes) else value
+    return None
+
+
 def _block_network(monkeypatch) -> list:
-    """Tüm soket bağlantı/DNS girişimlerini kaydedip reddeder; denemeleri liste olarak döndürür."""
+    """Dış ağa giden tüm soket bağlantı/DNS girişimlerini kaydedip reddeder; denemeleri döndürür.
+
+    Yerel llama-server (127.0.0.1) bağlantısı CLAUDE.md'deki izinli istisnadır; ona izin verilir.
+    """
     attempts: list = []
 
-    def refuse(*args, **kwargs):  # noqa: ANN002, ANN003
-        attempts.append(args)
-        raise OSError("Ağ erişimi test tarafından kapatıldı")
+    def guard(original, host_arg_index: int):  # noqa: ANN001, ANN202
+        def wrapper(*args, **kwargs):  # noqa: ANN002, ANN003
+            target = args[host_arg_index] if len(args) > host_arg_index else None
+            if _host_of(target) in _LOOPBACK:
+                return original(*args, **kwargs)
+            attempts.append(args)
+            raise OSError("Ağ erişimi test tarafından kapatıldı")
+        return wrapper
 
-    monkeypatch.setattr(socket.socket, "connect", refuse)
-    monkeypatch.setattr(socket.socket, "connect_ex", refuse)
-    monkeypatch.setattr(socket, "create_connection", refuse)
-    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+    monkeypatch.setattr(socket.socket, "connect", guard(socket.socket.connect, 1))
+    monkeypatch.setattr(socket.socket, "connect_ex", guard(socket.socket.connect_ex, 1))
+    monkeypatch.setattr(socket, "create_connection", guard(socket.create_connection, 0))
+    monkeypatch.setattr(socket, "getaddrinfo", guard(socket.getaddrinfo, 0))
     return attempts
 
 

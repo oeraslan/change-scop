@@ -116,7 +116,9 @@ Ajanlar sadece kendi klasörlerinde yazar. `core/contracts.py` ve `core/pipeline
 - **Faz 3:** Gömülü Gemma 4 12B ile bölge yorumu + genel özet (alt panel dolar), PyInstaller paketi
 
 ## Komutlar (her zaman venv python'u)
-- Testler: `.venv\Scripts\python.exe -m pytest -q`
+- Testler: `.venv\Scripts\python.exe -m pytest -q` (gerçek Gemma testleri hariç, ~15 dk)
+- Gerçek Gemma testleri (yalnızca `core/llm` veya LLM akışı değişince): `.venv\Scripts\python.exe -m pytest -q -m llm`
+- Paket: `.\build.ps1` (dist\ChangeScope\ChangeScope.exe; `-SkipModels` ile modeller kopyalanmaz)
 - Uygulama: `.venv\Scripts\python.exe -m app.main`
 - Modelleri indir (sadece geliştirmede): `.venv\Scripts\python.exe scripts/download_models.py`
 - PyTorch kurulumu: `.venv\Scripts\python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126`

@@ -5,6 +5,9 @@ requires-python = ">=3.12,<3.13"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Gerçek Gemma testleri (model yükleme + yorum, dakikalar sürer) varsayılan koşuda atlanır.
+# Ayrıca koşmak için: pytest -m llm   (komut satırındaki -m bu varsayılanı geçersiz kılar)
+addopts = "-m \"not llm\""
 markers = [
     "llm: gerçek Gemma modeli gerektirir (model yoksa skip)",
     "models: model ağırlıkları gerektirir (yoksa skip)",
