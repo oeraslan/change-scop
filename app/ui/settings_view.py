@@ -19,7 +19,7 @@ from qfluentwidgets import (
 from qfluentwidgets import FluentIcon as FIF
 
 from app.prefs import THEMES, UiPrefs, save_prefs
-from core.config import AppConfig, save_config
+from core.config import LLM_MODELS, AppConfig, save_config
 
 THEME_TEXTS = ["Koyu", "Açık", "Sistem"]
 TILE_SIZES = [512, 768, 1024, 1536, 2048]
@@ -27,6 +27,9 @@ METHODS = ["ssim", "dinov2", "ssim+dinov2"]
 METHOD_TEXTS = ["SSIM", "DINOv2", "Birleşik (SSIM + DINOv2)"]
 DEVICES = ["auto", "cuda", "cpu"]
 DEVICE_TEXTS = ["Otomatik", "GPU (CUDA)", "CPU"]
+LLM_KEYS = list(LLM_MODELS)
+DOWNLOAD_KEYS = {"gemma-4-12b": "gemma-12b", "gemma-4-e4b": "gemma-e4b"}
+MAX_REGIONS_RANGE = (5, 30)
 
 
 class SettingsView(QWidget):
@@ -38,6 +41,7 @@ class SettingsView(QWidget):
     settingsSaved = Signal()
     pipelineSettingsChanged = Signal()      # hassasiyet / tile / LLM / cihaz: pipeline yeniden kurulmalı
     deviceChanged = Signal(str)
+    llmSettingsChanged = Signal()           # model / bölge sayısı / GPU katmanı: durum çubuğu yenilensin
 
     def __init__(
         self, config: AppConfig, prefs: UiPrefs, config_path: Path | None = None,
@@ -76,6 +80,51 @@ class SettingsView(QWidget):
         self.llm_switch.checkedChanged.connect(self._on_llm)
         llm_card = self._card(FIF.ROBOT, "Yapay zekâ yorumu (Gemma)",
                               "Bölgeleri açıklar ve gölge/ışık kaynaklı yanlış alarmları ayıklar.", self.llm_switch)
+
+        # LLM modeli
+        self.llm_model_combo = ComboBox(self)
+        self.llm_model_combo.addItems([LLM_MODELS[k].display_name for k in LLM_KEYS])
+        cur = config.llm.model if config.llm.model in LLM_KEYS else LLM_KEYS[0]
+        self.llm_model_combo.setCurrentIndex(LLM_KEYS.index(cur))
+        self.llm_model_combo.setFixedWidth(180)
+        self.llm_model_combo.currentIndexChanged.connect(self._on_llm_model)
+        self.llm_model_card = self._card(FIF.ROBOT, "Yapay zekâ modeli", self.llm_model_description(),
+                                         self.llm_model_combo)
+
+        # En çok yorumlanacak bölge
+        lo, hi = MAX_REGIONS_RANGE
+        self.max_regions_slider = Slider(Qt.Orientation.Horizontal, self)
+        self.max_regions_slider.setRange(lo, hi)
+        self.max_regions_slider.setValue(min(max(config.llm.max_regions, lo), hi))
+        self.max_regions_slider.setFixedWidth(220)
+        self.max_regions_label = BodyLabel(str(self.max_regions_slider.value()), self)
+        self.max_regions_label.setFixedWidth(32)
+        self.max_regions_slider.valueChanged.connect(self._on_max_regions)
+        max_regions_card = self._card(
+            FIF.TILES, "En çok yorumlanacak bölge",
+            "Yalnızca en yüksek skorlu bu kadar bölge yorumlanır (bölge başına ~10-20 sn).",
+            self.max_regions_slider, self.max_regions_label)
+
+        # GPU katmanı
+        self.gpu_mode_combo = ComboBox(self)
+        self.gpu_mode_combo.addItems(["Otomatik", "Elle"])
+        self.gpu_spin = Slider(Qt.Orientation.Horizontal, self)     # SpinBox koyu temada metni çizmiyor
+        self.gpu_spin.setFixedWidth(160)
+        self.gpu_spin.setRange(0, LLM_MODELS[cur].n_layers)
+        self.gpu_label = BodyLabel("", self)
+        self.gpu_label.setFixedWidth(72)
+        manual = not isinstance(config.llm.n_gpu_layers, str)
+        self.gpu_mode_combo.setCurrentIndex(1 if manual else 0)
+        self.gpu_spin.setValue(int(config.llm.n_gpu_layers) if manual else LLM_MODELS[cur].n_layers // 2)
+        self.gpu_spin.setEnabled(manual)
+        self._update_gpu_label()
+        self.gpu_mode_combo.setFixedWidth(120)
+        self.gpu_mode_combo.currentIndexChanged.connect(self._on_gpu_layers)
+        self.gpu_spin.valueChanged.connect(self._on_gpu_layers)
+        gpu_card = self._card(
+            FIF.SPEED_HIGH, "GPU katmanı",
+            "Modelin kaç katmanı GPU'ya yüklensin (Otomatik: boş VRAM'e göre; 0 = tamamen CPU).",
+            self.gpu_mode_combo, self.gpu_spin, self.gpu_label)
 
         # Hassasiyet
         self.sens_slider = Slider(Qt.Orientation.Horizontal, self)
@@ -128,7 +177,8 @@ class SettingsView(QWidget):
         lay.addWidget(title)
         lay.addWidget(note)
         lay.addSpacing(16)
-        for card in (theme_card, self.library_card, llm_card, sens_card, self.method_card, tile_card, device_card):
+        for card in (theme_card, self.library_card, llm_card, self.llm_model_card, max_regions_card, gpu_card,
+                     sens_card, self.method_card, tile_card, device_card):
             lay.addWidget(card)
         lay.addStretch(1)
 
@@ -175,6 +225,50 @@ class SettingsView(QWidget):
         self.config.llm.enabled = on
         self._save()
         self.llmEnabledChanged.emit(on)
+        self.pipelineSettingsChanged.emit()
+
+    def llm_model_description(self) -> str:
+        """Seçili modele göre açıklama; dosya yoksa indirme komutunu belirtir."""
+        spec = self.config.llm.model_spec
+        text = f"{spec.display_name} (~{spec.approx_vram_mb / 1000:.1f} GB VRAM, {spec.n_layers} katman)."
+        try:
+            present = spec.gguf_path(self.config.paths.models_dir).is_file()
+        except OSError:
+            present = False
+        if not present:
+            text += (" İndirilmemiş: scripts/download_models.py --only "
+                     f"{DOWNLOAD_KEYS.get(spec.key, spec.key)}")
+        return text
+
+    def _on_llm_model(self, index: int) -> None:
+        self.config.llm.model = LLM_KEYS[index]
+        spec = LLM_MODELS[LLM_KEYS[index]]
+        self.gpu_spin.setRange(0, spec.n_layers)
+        self._update_gpu_label()
+        self.llm_model_card.contentLabel.setText(self.llm_model_description())
+        self._save()
+        self.llmSettingsChanged.emit()
+        self.pipelineSettingsChanged.emit()
+
+    def _on_max_regions(self, value: int) -> None:
+        self.max_regions_label.setText(str(value))
+        self.config.llm.max_regions = value
+        self._save()
+        self.llmSettingsChanged.emit()
+        self.pipelineSettingsChanged.emit()
+
+    def _update_gpu_label(self) -> None:
+        total = self.config.llm.model_spec.n_layers
+        manual = self.gpu_mode_combo.currentIndex() == 1
+        self.gpu_label.setText(f"{self.gpu_spin.value()}/{total}" if manual else "Otomatik")
+
+    def _on_gpu_layers(self, *_args) -> None:
+        manual = self.gpu_mode_combo.currentIndex() == 1
+        self.gpu_spin.setEnabled(manual)
+        self._update_gpu_label()
+        self.config.llm.n_gpu_layers = int(self.gpu_spin.value()) if manual else "auto"
+        self._save()
+        self.llmSettingsChanged.emit()
         self.pipelineSettingsChanged.emit()
 
     def _on_sensitivity(self, value: int) -> None:

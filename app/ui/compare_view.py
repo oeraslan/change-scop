@@ -78,6 +78,7 @@ class CompareView(QWidget):
     backRequested = Signal()
     resultSaved = Signal(int)       # kaydedilen karşılaştırma id'si (geçmiş listesini yenilemek için)
     maskSaved = Signal(object)      # kaydedilen maskeli ImageRecord
+    llmActivity = Signal(bool)    # LLM asamasi basladi (True) / bitti-iptal-hata (False): durum cubugu icin
     workersIdle = Signal()        # hiçbir arka plan işi kalmadı (ertelenen ayar değişiklikleri için)
 
     def __init__(self, library: Library | None = None, parent: QWidget | None = None) -> None:
@@ -90,9 +91,11 @@ class CompareView(QWidget):
         self._comparison: ComparisonRecord | None = None
         self._result: ComparisonResult | None = None
         self._worker: ComparisonWorker | None = None
-        self._deferred_start: tuple[bool, bool, bool] | None = None   # (use_llm, loading_ai, force)
+        self._deferred_start: tuple | None = None   # (use_llm, loading_ai, force, interpret_result)
         self._infobars: list[InfoBar] = []
         self._model_name = "Gemma 4 12B"
+        self._partial_shown = False       # CV sonucu gosterildi, AI yorumu bekleniyor
+        self._llm_active = False
         self._sized = False
         self._mask_workers: set[MaskWorker] = set()
         self._mask_saving = False
@@ -285,6 +288,10 @@ class CompareView(QWidget):
         self._model_name = name
         self.ai_panel.set_model_name(name)
 
+    def is_llm_active(self) -> bool:
+        """LLM aşaması (otomatik ya da "Yorumla") sürüyor mu?"""
+        return self._llm_active
+
     def is_busy(self) -> bool:
         """Bu ekranın aktif işi var mı (pipeline / kayıt / önbellek okuma)?"""
         return self._deferred_start is not None or (self._worker is not None and self._worker.isRunning())
@@ -327,6 +334,7 @@ class CompareView(QWidget):
         self.mask_badge.setVisible(bool(before.mask_hash))
         self._comparison = None
         self._result = None
+        self._partial_shown = False
         self._set_header(before, after)
         self._clear_infobars()
         self.ai_panel.show_off()
@@ -348,8 +356,15 @@ class CompareView(QWidget):
             return
         self.open_pair(before, after, force=force)
 
-    def show_result(self, result: ComparisonResult, title: str | None = None, dates: str | None = None) -> None:
-        """Hazır bir sonucu gösterir (kayıttan açma, demo ve testler için de kullanılır)."""
+    def show_result(
+        self, result: ComparisonResult, title: str | None = None, dates: str | None = None,
+        interpreting: bool = False, keep_view: bool = False,
+    ) -> None:
+        """Hazır bir sonucu gösterir (kayıttan açma, demo ve testler için de kullanılır).
+
+        `interpreting=True`: kutular/kartlar hemen çizilir, AI paneli yükleniyor durumunda kalır.
+        `keep_view=True`: aynı görüntüler yeniden yorumlanıyor; zoom/pan korunur.
+        """
         self._result = result
         self._outer.setCurrentWidget(self.body)
         if title is not None:
@@ -357,8 +372,8 @@ class CompareView(QWidget):
         if dates is not None:
             self.dates_label.setText(dates)
         reg = result.registration
-        self.before_view.set_image(rgb_to_qimage(reg.before.pixels))
-        self.after_view.set_image(rgb_to_qimage(reg.after_warped))
+        self.before_view.set_image(rgb_to_qimage(reg.before.pixels), keep_view=keep_view)
+        self.after_view.set_image(rgb_to_qimage(reg.after_warped), keep_view=keep_view)
         failed = reg.quality is AlignmentQuality.FAILED or result.detection is None
 
         self._clear_infobars()
@@ -405,10 +420,12 @@ class CompareView(QWidget):
         self.hide_false_check.setEnabled(not failed)
         self._apply_toggles(animate=False)
         self.ai_panel.set_hide_false_alarms(self.hide_false_check.isChecked())
-        self.ai_panel.set_result(result)
+        interpreting = interpreting and not failed and bool(result.detection.regions)  # type: ignore[union-attr]
+        self.ai_panel.set_result(result, interpreting=interpreting)
         self.export_button.setEnabled(True)
         self.group.highlight(None)
-        QTimer.singleShot(0, self.group.fit_all)
+        if not keep_view:
+            QTimer.singleShot(0, self.group.fit_all)
 
     @staticmethod
     def _spec(region) -> RegionSpec:
@@ -553,26 +570,42 @@ class CompareView(QWidget):
 
     # ---------------------------------------------------------------- işlem
 
-    def _start_worker(self, use_llm: bool, loading_ai: bool, force: bool = True) -> None:
+    def _start_worker(
+        self, use_llm: bool, loading_ai: bool, force: bool = True,
+        interpret_result: ComparisonResult | None = None,
+    ) -> None:
         assert self._before_rec and self._after_rec and self.library
         self._set_progress_visible(True)
         self.progress_bar.setValue(0)
         self.export_button.setEnabled(False)
         if loading_ai:
-            self.ai_panel.show_loading()
+            det = interpret_result.detection if interpret_result is not None else None
+            if det is not None and det.regions:
+                self.ai_panel.set_result(interpret_result, interpreting=True)    # kartlar kalır
+                self._partial_shown = True
+            else:
+                self.ai_panel.show_loading()
+            self._set_llm_active(True)
         if any(w.isRunning() for w in _RETIRED):
             # Önceki (iptal edilmiş) iş modelleri bırakana kadar bekle; çakışma olmasın.
-            self._deferred_start = (use_llm, loading_ai, force)
+            self._deferred_start = (use_llm, loading_ai, force, interpret_result)
             self.stage_label.setText("Önceki işlem durduruluyor…")
             return
-        self._launch(use_llm, loading_ai, force)
+        self._launch(use_llm, loading_ai, force, interpret_result)
 
-    def _launch(self, use_llm: bool, loading_ai: bool, force: bool) -> None:
+    def _set_llm_active(self, active: bool) -> None:
+        if active != self._llm_active:
+            self._llm_active = active
+            self.llmActivity.emit(active)
+
+    def _launch(self, use_llm: bool, loading_ai: bool, force: bool,
+                interpret_result: ComparisonResult | None = None) -> None:
         assert self._before_rec and self._after_rec and self.library
         worker = ComparisonWorker(
             self.library, self._before_rec, self._after_rec, use_llm, force=force,
-            load_previews=not loading_ai,
+            load_previews=not loading_ai, interpret_result=interpret_result,
         )
+        worker.partial.connect(self._on_partial)
         worker.previews.connect(self._on_previews)
         worker.progress.connect(self._on_progress)
         worker.succeeded.connect(self._on_success)
@@ -585,12 +618,15 @@ class CompareView(QWidget):
 
     def interpret(self) -> None:
         """"Yorumla": AI yorumunu (LLM açık) sonradan çalıştırır."""
-        if self._before_rec is None or self._after_rec is None or self.is_busy():
+        if self._before_rec is None or self._after_rec is None or self.is_busy() or self._result is None:
             return
         if not self.ai_panel.interpret_enabled():
             return
-        self._clear_infobars(keep=("weak", "failed"))
-        self._start_worker(True, loading_ai=True)
+        det = self._result.detection
+        if det is None or not det.regions:
+            return          # yorumlanacak bölge yok
+        self._clear_infobars(keep=("weak", "failed", "overlap", "unreliable", "fallback"))
+        self._start_worker(True, loading_ai=True, interpret_result=self._result)
 
     def cancel(self) -> None:
         """Çalışan karşılaştırmayı iptal eder; UI beklemeden "İptal edildi" durumuna geçer."""
@@ -603,7 +639,7 @@ class CompareView(QWidget):
         self._deferred_start = None
         worker, self._worker = self._worker, None
         if worker is not None:
-            for sig in ("previews", "progress", "succeeded", "cancelled", "failed"):
+            for sig in ("partial", "previews", "progress", "succeeded", "cancelled", "failed"):
                 try:
                     getattr(worker, sig).disconnect()
                 except (TypeError, RuntimeError):
@@ -614,6 +650,7 @@ class CompareView(QWidget):
             else:
                 worker.deleteLater()
         self._set_progress_visible(False)
+        self._set_llm_active(False)
 
     def _set_progress_visible(self, visible: bool) -> None:
         self.progress_host.setVisible(visible)
@@ -628,13 +665,26 @@ class CompareView(QWidget):
     def _on_progress(self, stage: str, fraction: float, message: str) -> None:
         self.progress_bar.setValue(int(max(0.0, min(1.0, fraction)) * 1000))
         self.stage_label.setText(message or stage)
-        if stage.startswith("llm") and self.ai_panel.state() != "loading":
-            self.ai_panel.show_loading()
+        if stage.startswith("llm"):
+            self._set_llm_active(True)
+            if self.ai_panel.state() != "loading":
+                self.ai_panel.show_loading(message)
+            else:
+                self.ai_panel.set_stage_text(message)
+
+    def _on_partial(self, result: ComparisonResult) -> None:
+        """CV sonucu hazır: kutular/kartlar hemen çizilir, AI paneli yüklenir."""
+        self._partial_shown = True
+        self.show_result(result, interpreting=True)
 
     def _on_success(self, result: ComparisonResult, record, cached: bool, save_error: str) -> None:
         self._set_progress_visible(False)
+        self._set_llm_active(False)
         self._comparison = record
-        self.show_result(result)
+        keep = self._partial_shown or (
+            self._result is not None and self._result.registration is result.registration)
+        self._partial_shown = False
+        self.show_result(result, keep_view=keep)
         if save_error:
             self._info("warning", "Sonuç kaydedilemedi", save_error)
         elif record is not None and not cached:
@@ -642,6 +692,8 @@ class CompareView(QWidget):
 
     def _on_cancelled(self) -> None:
         self._set_progress_visible(False)
+        self._set_llm_active(False)
+        self._partial_shown = False
         self._info("info", "İptal edildi", "Karşılaştırma iptal edildi.", duration=4000)
         if self._result is not None:
             self.ai_panel.set_result(self._result)
@@ -651,6 +703,8 @@ class CompareView(QWidget):
 
     def _on_failed(self, message: str) -> None:
         self._set_progress_visible(False)
+        self._set_llm_active(False)
+        self._partial_shown = False
         self._info("error", "Karşılaştırma başarısız", message, key="error")
         if self._result is not None:
             self.ai_panel.set_result(self._result)

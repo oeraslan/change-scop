@@ -20,7 +20,7 @@ def test_status_bar_texts(window) -> None:
 
 def test_status_bar_llm_states(window) -> None:
     window.status_bar.set_llm_state("loading")
-    assert window.status_bar.llm_label.text() == "Gemma: yükleniyor"
+    assert window.status_bar.llm_label.text() == "Gemma: yükleniyor…"
     window.status_bar.set_llm_state("ready")
     assert window.status_bar.llm_label.text() == "Gemma: hazır"
 

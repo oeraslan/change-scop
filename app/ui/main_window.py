@@ -25,7 +25,15 @@ from app.ui.workers import DeviceProbe
 from core import pipeline as core_pipeline
 from core.config import AppConfig, LLM_MODELS
 
-GEMMA_DOWNLOAD_HINT = "Gemma modeli indirilmemiş: scripts/download_models.py --only gemma-12b"
+DOWNLOAD_KEYS = {"gemma-4-12b": "gemma-12b", "gemma-4-e4b": "gemma-e4b"}
+
+
+def download_hint(model_key: str) -> str:
+    """Model dosyası yoksa gösterilen indirme ipucu."""
+    return f"Gemma modeli indirilmemiş: scripts/download_models.py --only {DOWNLOAD_KEYS.get(model_key, 'gemma-12b')}"
+
+
+GEMMA_DOWNLOAD_HINT = download_hint("gemma-4-12b")
 RECONFIGURE_DEBOUNCE_MS = 400
 
 log = logging.getLogger(__name__)
@@ -75,7 +83,7 @@ class MainWindow(FluentWindow):
         self.library_view = LibraryView(library, self)
         self.compare_view = CompareView(library, self)
         self.settings_view = SettingsView(config, self.prefs, config_path, prefs_path, self)
-        self.compare_view.use_llm = config.llm.enabled
+        self.compare_view.use_llm = self.llm_ready()
 
         self.addSubInterface(self.library_view, FIF.PHOTO, "Kütüphane")
         self.addSubInterface(self.compare_view, FIF.VIEW, "Karşılaştırma")
@@ -94,6 +102,8 @@ class MainWindow(FluentWindow):
         self.settings_view.themeChanged.connect(self.set_theme)
         self.settings_view.libraryDirChanged.connect(self.switch_library)
         self.settings_view.llmEnabledChanged.connect(self._on_llm_toggled)
+        self.settings_view.llmSettingsChanged.connect(self._on_llm_toggled)
+        self.compare_view.llmActivity.connect(self._on_llm_activity)
         self.settings_view.pipelineSettingsChanged.connect(self.schedule_pipeline_reconfigure)
         self.settings_view.deviceChanged.connect(self._start_device_probe)
         self.compare_view.workersIdle.connect(self._on_workers_idle)
@@ -110,13 +120,15 @@ class MainWindow(FluentWindow):
 
     def open_compare(self, before, after) -> None:
         """Karşılaştırma ekranını açar ve (gerekirse) hesaplamayı başlatır."""
-        self.compare_view.use_llm = self.config.llm.enabled
+        self.compare_view.use_llm = self.llm_ready()
+        self._refresh_llm_status()
         self.switchTo(self.compare_view)
         self.compare_view.open_pair(before, after)
 
     def open_saved_comparison(self, rec, force: bool = False) -> None:
         """Geçmişten kaydedilmiş bir karşılaştırmayı açar (yeniden hesaplamaz; `force=True` hesaplar)."""
-        self.compare_view.use_llm = self.config.llm.enabled
+        self.compare_view.use_llm = self.llm_ready()
+        self._refresh_llm_status()
         self.switchTo(self.compare_view)
         self.compare_view.open_comparison(rec, force=force)
 
@@ -179,31 +191,69 @@ class MainWindow(FluentWindow):
         if self._reconfigure_pending and not self._closing:
             self._apply_pipeline_config()
 
-    def _on_llm_toggled(self, on: bool) -> None:
-        self.compare_view.use_llm = on
+    def llm_problem(self) -> tuple[str, str] | None:
+        """LLM kullanılamıyorsa (kısa neden, ayrıntı); hazırsa None. Sunucuyu başlatmaz."""
+        cfg = self.config
+        spec = cfg.llm.model_spec
+        if not cfg.llm.enabled:
+            return "", "disabled"
+        if not (spec.gguf_path(cfg.paths.models_dir).is_file() and spec.mmproj_path(cfg.paths.models_dir).is_file()):
+            return "model bulunamadı", "model"
+        if not cfg.paths.llama_server_exe.is_file():
+            return "llama-server bulunamadı", "exe"
+        return None
+
+    def llm_ready(self) -> bool:
+        """Ayarlarda açık VE model + llama-server mevcut mu (`llm_status()["available"]` ile aynı kural)."""
+        return self.llm_problem() is None
+
+    def _on_llm_toggled(self, *_args) -> None:
+        self.compare_view.use_llm = self.llm_ready()
         self._refresh_llm_status()
 
+    def _on_llm_activity(self, active: bool) -> None:
+        """Karşılaştırma ekranındaki LLM aşaması başladı/bitti: durum çubuğu olay bazlı güncellenir."""
+        if active:
+            self.status_bar.set_llm_state("loading")
+        else:
+            self._refresh_llm_status()
+
     def _refresh_llm_status(self) -> None:
-        """Gemma durumu + "Yorumla" düğmesinin kullanılabilirliği (ayar kapalı / model yok / hazır)."""
+        """Gemma durumu + "Yorumla" düğmesinin kullanılabilirliği (ayar kapalı / model yok / hazır / çalışıyor)."""
         cfg = self.config
         spec = cfg.llm.model_spec
         self.compare_view.set_model_name(spec.display_name)
         panel = self.compare_view.ai_panel
-        if not cfg.llm.enabled:
+        problem = self.llm_problem()
+        if problem is None:
+            info: dict = {}
+            try:
+                info = dict(core_pipeline.llm_status())
+            except Exception:  # noqa: BLE001 - durum bilgisi isteğe bağlı
+                log.debug("llm_status okunamadı", exc_info=True)
+            if self.compare_view.is_llm_active():
+                self.status_bar.set_llm_state("loading")
+            elif info.get("running"):
+                ngl = info.get("ngl")
+                self.status_bar.set_llm_state(
+                    "running", f"GPU katmanı {ngl}/{spec.n_layers}" if ngl is not None else "")
+            else:
+                self.status_bar.set_llm_state("ready", spec.display_name)
+            panel.set_interpret_available(True)
+            return
+        reason, kind = problem
+        if kind == "disabled":
             self.status_bar.set_llm_state("off")
             panel.set_interpret_available(
                 False, "Yapay zekâ yorumu Ayarlar sayfasından kapatılmış. Açmak için Ayarlar > Yapay zekâ yorumu.",
                 "Yapay zekâ yorumu ayarlarda kapalı")
-        elif not spec.gguf_path(cfg.paths.models_dir).exists():
-            self.status_bar.set_llm_state("off", "model bulunamadı")
-            panel.set_interpret_available(False, GEMMA_DOWNLOAD_HINT, "Yapay zekâ yorumu kullanılamıyor")
-        elif not cfg.paths.llama_server_exe.exists():
-            self.status_bar.set_llm_state("off", "llama-server bulunamadı")
+        elif kind == "model":
+            self.status_bar.set_llm_state("off", reason)
+            panel.set_interpret_available(False, download_hint(cfg.llm.model), "Yapay zekâ yorumu kullanılamıyor")
+        else:
+            self.status_bar.set_llm_state("off", reason)
             panel.set_interpret_available(
                 False, f"llama-server bulunamadı: {cfg.paths.llama_server_exe}", "Yapay zekâ yorumu kullanılamıyor")
-        else:
-            self.status_bar.set_llm_state("ready", spec.display_name)
-            panel.set_interpret_available(True)
 
     def _update_library_info(self) -> None:
         repo = self.library.repo
@@ -216,6 +266,16 @@ class MainWindow(FluentWindow):
             geo = screen.availableGeometry()
             self.move(geo.center().x() - self.width() // 2, max(0, geo.center().y() - self.height() // 2))
 
+    @staticmethod
+    def _kill_llm_server() -> None:
+        """Çalışan llama-server'ı hemen durdurur (pipeline'ın analistini doğrudan kapatır)."""
+        pipe = getattr(core_pipeline, "_default_pipeline", None)
+        try:
+            if pipe is not None:
+                pipe.shutdown()
+        except Exception:  # noqa: BLE001
+            log.exception("llama-server durdurulamadı")
+
     def closeEvent(self, event) -> None:  # noqa: N802
         """Kapanış: pencere hemen gizlenir; çalışan işler iptal edilip beklenir, sonra pipeline kapatılır."""
         if self._closing:
@@ -225,7 +285,11 @@ class MainWindow(FluentWindow):
         self._reconfigure_timer.stop()
         self.hide()                       # kullanıcı bekleme görmesin
         self.library_view.shutdown()
-        self.compare_view.shutdown()      # iptal + olay döngüsünü işleterek kısa bekleme
+        self.compare_view.shutdown(timeout_ms=3000)      # iptal + olay döngüsünü işleterek kısa bekleme
+        if self.compare_view.has_running_workers():
+            # LLM bölge isteği sürüyor olabilir (8-22 sn): sunucuyu öldürmek istekleri hemen düşürür.
+            self._kill_llm_server()
+            self.compare_view.shutdown(timeout_ms=8000)
         try:
             core_pipeline.shutdown_default_pipeline()   # kurulmamışsa no-op; llama-server'ı sonlandırır
         except Exception:  # noqa: BLE001

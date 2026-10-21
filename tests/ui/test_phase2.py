@@ -32,9 +32,9 @@ def _capturing_pipeline():
     seen: list[np.ndarray | None] = []
     real = pipe.run
 
-    def run(before, after, progress=None, use_llm=False, cancel=None, ignore_mask=None):
+    def run(before, after, progress=None, use_llm=False, cancel=None, ignore_mask=None, on_cv_result=None):
         seen.append(None if ignore_mask is None else np.array(ignore_mask))
-        return real(before, after, progress, use_llm, cancel, ignore_mask)
+        return real(before, after, progress, use_llm, cancel, ignore_mask, on_cv_result)
 
     pipe.run = run  # type: ignore[method-assign]
     return pipe, seen

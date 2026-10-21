@@ -28,6 +28,8 @@ from app.ui.theme import (
 )
 from core.contracts import AlignmentQuality, ChangeRegion, ChangeVerdict, ComparisonResult
 
+LOADING_TEXT = "Yapay zekâ yorumlanıyor…"
+MODEL_LOADING_HINT = " İlk seferde ~2 dk sürebilir."
 CARD_W, CARD_H = 248, 198
 THUMB_W, THUMB_H = 108, 72
 
@@ -104,7 +106,8 @@ class RegionCard(Surface):
 
     clicked = Signal(int)
 
-    def __init__(self, region: ChangeRegion, result: ComparisonResult, parent: QWidget | None = None) -> None:
+    def __init__(self, region: ChangeRegion, result: ComparisonResult, parent: QWidget | None = None,
+                 pending: bool = False) -> None:
         super().__init__(parent, hoverable=True)
         self.region = region
         self.setFixedSize(CARD_W, CARD_H)
@@ -120,7 +123,8 @@ class RegionCard(Surface):
         right.setTextColor(QColor(0, 0, 0, 140), QColor(255, 255, 255, 150))
         self.confidence_label = right
 
-        desc_text = region.description or "Açıklama için “Yorumla” düğmesini kullanın."
+        desc_text = region.description or (
+            "Yorum bekleniyor…" if pending else "Açıklama için “Yorumla” düğmesini kullanın.")
         desc = CaptionLabel(desc_text)
         desc.setWordWrap(True)
         desc.setFixedHeight(36)
@@ -245,6 +249,9 @@ class AiPanel(Surface):
         self._top_bars = [SkeletonBar(None, 12), SkeletonBar(None, 12), SkeletonBar(360, 12)]
         for bar in self._top_bars:
             ll.addWidget(bar)
+        self.stage_label = CaptionLabel(LOADING_TEXT, loading_page)
+        self.stage_label.setTextColor(QColor(0, 0, 0, 140), QColor(255, 255, 255, 150))
+        ll.addWidget(self.stage_label)
         ll.addStretch(1)
 
         self.page_summary, self.page_off, self.page_message, self.page_loading = (
@@ -349,14 +356,26 @@ class AiPanel(Surface):
     def _show_top(self, page: QWidget) -> None:
         """Üst sayfayı gösterir ve yüksekliğini içeriğe göre ayarlar."""
         heights = {id(self.page_summary): 84, id(self.page_off): 96, id(self.page_message): 96,
-                   id(self.page_loading): 64}
+                   id(self.page_loading): 84}
         self.top_stack.setCurrentWidget(page)
         self.top.setFixedHeight(heights[id(page)])
 
-    def show_loading(self) -> None:
+    def set_stage_text(self, text: str) -> None:
+        """Yükleme sırasında aşama metni ("Bölge 3/8 yorumlandı"); model yüklenirken süre ipucu eklenir."""
+        text = text or LOADING_TEXT
+        if "yükleniyor" in text and MODEL_LOADING_HINT.strip() not in text:
+            text += MODEL_LOADING_HINT
+        self.stage_label.setText(text)
+
+    def is_interpreting(self) -> bool:
+        """Kartlar ekrandayken AI yorumu sürüyor mu?"""
+        return self._state == "loading" and bool(self._cards)
+
+    def show_loading(self, text: str = "") -> None:
         """Skeleton/shimmer yükleme animasyonu."""
         self._clear_cards()
         self._set_state("loading")
+        self.set_stage_text(text)
         self._show_top(self.page_loading)
         for _ in range(3):
             card = _SkeletonCard(self.cards_host)
@@ -373,8 +392,11 @@ class AiPanel(Surface):
         self._show_top(self.page_message)
         self.scroll.setVisible(False)
 
-    def set_result(self, result: ComparisonResult | None) -> None:
-        """Sonuca göre paneli doldurur (özet + kartlar ya da uygun boş durum)."""
+    def set_result(self, result: ComparisonResult | None, interpreting: bool = False, text: str = "") -> None:
+        """Sonuca göre paneli doldurur (özet + kartlar ya da uygun boş durum).
+
+        `interpreting=True`: CV kartları hemen gösterilir, üst alan skeleton/shimmer + aşama metni olur.
+        """
         self._result = result
         if result is None:
             self.show_off()
@@ -391,7 +413,7 @@ class AiPanel(Surface):
 
         self._clear_cards()
         for region in regions:
-            card = RegionCard(region, result, self.cards_host)
+            card = RegionCard(region, result, self.cards_host, pending=interpreting)
             card.clicked.connect(self.regionActivated)
             self._cards[region.region_id] = card
             self.cards_layout.insertWidget(self.cards_layout.count() - 1, card)
@@ -399,7 +421,12 @@ class AiPanel(Surface):
         self._apply_card_filter()
 
         interpreted = result.llm_used or bool(result.summary)
-        if interpreted:
+        if interpreting:
+            self._set_state("loading")
+            self.set_stage_text(text)
+            self._show_top(self.page_loading)
+            self._shimmer.start()
+        elif interpreted:
             self._set_state("ready")
             self.summary_label.setText(result.summary or "Bölgeler yorumlandı; genel özet üretilemedi.")
             self._show_top(self.page_summary)

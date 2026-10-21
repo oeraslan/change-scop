@@ -53,9 +53,12 @@ def shot(widget, out: Path, name: str) -> Path:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--phase3", action="store_true", help="yalnızca Faz 3 ekranları (AI yükleniyor/dolu, ayarlar)")
     args = parser.parse_args(argv)
     out: Path = args.out
     out.mkdir(parents=True, exist_ok=True)
+    if args.phase3:
+        return phase3(out)
 
     app = QApplication.instance() or QApplication(sys.argv)
     apply_app_font(app)
@@ -213,6 +216,65 @@ def main(argv: list[str] | None = None) -> int:
     wait(500)
     shot(win, out, "12_acik_tema_galeri.png")
 
+    win.close()
+    return 0
+
+
+def phase3(out: Path) -> int:
+    """Faz 3 ekranları: AI paneli yükleniyor (kartlar + shimmer + aşama metni), dolu (verdict), ayarlar."""
+    from tests.ui.helpers import make_result
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    apply_app_font(app)
+    apply_theme("dark")
+    tmp = Path(tempfile.mkdtemp(prefix="changescope_shots_"))
+    library = Library(tmp / "library")
+    seed_demo_library(library, tmp / "seed")
+    install_demo_pipeline()
+    config = AppConfig()
+    config.paths.library_dir = library.root
+    config.paths.models_dir = tmp / "models"
+    config.paths.bin_dir = tmp / "bin"
+    spec = config.llm.model_spec
+    for path in (spec.gguf_path(config.paths.models_dir), spec.mmproj_path(config.paths.models_dir),
+                 config.paths.llama_server_exe):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+    win = MainWindow(library, config, UiPrefs(), tmp / "config.json", tmp / "prefs.json",
+                     probe_device=False, reconfigure_pipeline=False)
+    win.status_bar.set_device("GPU · NVIDIA GeForce RTX 2060")
+    win.setMicaEffectEnabled(False)
+    win.resize(1440, 900)
+    win.show()
+    wait(500)
+    cv = win.compare_view
+    win.switchTo(cv)
+    cv.show_result(make_result(960, 720), "X Bölgesi / Y Dağı", "12.10.2026  →  19.10.2026", interpreting=True)
+    cv.ai_panel.set_stage_text("Bölge 2/3 yorumlandı")
+    win._on_llm_activity(True)
+    wait(500)
+    shot(win, out, "20_ai_yukleniyor_kartlar_bekliyor.png")
+    cv.ai_panel.set_stage_text("Yapay zekâ modeli yükleniyor…")
+    wait(300)
+    shot(win, out, "21_ai_model_yukleniyor.png")
+    cv.show_result(make_result(960, 720, with_llm=True), keep_view=True)
+    win._on_llm_activity(False)
+    win.status_bar.set_llm_state("running", "GPU katmanı 28/48")
+    wait(500)
+    shot(win, out, "22_ai_dolu_verdict_rozetleri.png")
+    win.switchTo(win.settings_view)
+    win.settings_view.llm_model_combo.setCurrentIndex(1)
+    win.settings_view.llm_model_combo.setCurrentIndex(0)
+    win.settings_view.gpu_mode_combo.setCurrentIndex(1)
+    win.settings_view.gpu_spin.setValue(28)
+    wait(300)
+    # LLM kartlarının görünmesi için kaydır
+    from qfluentwidgets import SingleDirectionScrollArea
+    area = win.settings_view.findChild(SingleDirectionScrollArea)
+    if area is not None:
+        area.verticalScrollBar().setValue(120)
+    wait(300)
+    shot(win, out, "23_ayarlar_llm.png")
     win.close()
     return 0
 

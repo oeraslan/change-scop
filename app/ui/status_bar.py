@@ -12,8 +12,9 @@ from app.ui.theme import palette
 
 LLM_STATES = {
     "off": ("kapalı", "#94A3B8"),
-    "loading": ("yükleniyor", "#F59E0B"),
+    "loading": ("yükleniyor…", "#F59E0B"),
     "ready": ("hazır", "#34D399"),
+    "running": ("çalışıyor", "#22D3EE"),
 }
 
 
@@ -59,10 +60,16 @@ class StatusBar(QWidget):
         lay.addWidget(self.device_label)
 
     def set_llm_state(self, state: str, detail: str = "") -> None:
-        """`off` / `loading` / `ready` durumunu gösterir."""
+        """`off` / `loading` / `ready` / `running` durumunu gösterir."""
         text, color = LLM_STATES[state]
         self._dot.set_color(color)
-        self.llm_label.setText(f"Gemma: {text}" + (f" ({detail})" if detail else ""))
+        if not detail:
+            suffix = ""
+        elif state == "running":
+            suffix = f" · {detail}"
+        else:
+            suffix = f" ({detail})"
+        self.llm_label.setText(f"Gemma: {text}{suffix}")
 
     def set_device(self, text: str) -> None:
         self.device_label.setText(text)
