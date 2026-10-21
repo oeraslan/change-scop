@@ -17,3 +17,4 @@ tests/data/synthetic/
 /karsilastirma*.png
 /karsilastirma*.csv
 /karsilastirma*.txt
+!packaging/*.spec
