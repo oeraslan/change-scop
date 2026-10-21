@@ -166,7 +166,10 @@ class RegistrationConfig:
 
 @dataclass
 class DetectionConfig:
-    method: Literal["ssim", "dinov2", "ssim+dinov2"] = "ssim"
+    # Faz 2 ölçümü: ssim+dinov2 ölçülen tüm sentetik senaryolarda SSIM'den kötü değil; doku/ton kaymasında
+    # sahte bölge 211 → 11, gölgede 10 → 6. GPU maliyeti ~+0.5 s / ~200 MB, CPU'da ~+20 s.
+    # DINOv2 modeli yoksa detector otomatik SSIM'e düşer.
+    method: Literal["ssim", "dinov2", "ssim+dinov2"] = "ssim+dinov2"
     light_normalization: Literal["none", "histogram", "clahe", "histogram+clahe"] = "histogram+clahe"
     ssim_window: int = 7
     blur_sigma: float = 1.5                 # Sıkıştırma gürültüsüne karşı ön bulanıklaştırma
