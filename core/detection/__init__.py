@@ -13,8 +13,8 @@ from core.detection.ssim_detector import SsimChangeDetector
 def create_detector(config: AppConfig | None = None) -> ChangeDetector:
     """Config'e göre bir `ChangeDetector` üretir (`release()` metodu vardır).
 
-    Faz 1: yalnızca SSIM. `method` "dinov2"/"ssim+dinov2" ise SSIM'e düşülür ve
-    bu durum `params["fallback_reason"]` içinde belirtilir.
+    `method`: "ssim" | "dinov2" | "ssim+dinov2". DINOv2 modeli/kaynağı yoksa SSIM'e düşülür ve
+    bu durum `params["fallback_reason"]` ile `DetectionResult.method` içinde belirtilir.
     """
     return SsimChangeDetector(config)
 

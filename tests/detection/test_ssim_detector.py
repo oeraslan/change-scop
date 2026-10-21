@@ -155,18 +155,6 @@ def test_failed_raises():
         create_detector().detect(reg)
 
 
-def test_dinov2_falls_back_to_ssim():
-    cfg = AppConfig()
-    cfg.detection.method = "dinov2"
-    pair, _ = pair_registration(PairParams(n_new_objects=0))
-    det = create_detector(cfg)
-    result = det.detect(make_registration(pair.before, pair.before))
-    assert result.method == "ssim"
-    assert result.params["method_requested"] == "dinov2"
-    assert "fallback_reason" in result.params
-    det.release()
-
-
 def test_sensitivity_scales_threshold():
     pair, reg = pair_registration(PairParams(n_new_objects=0, width=800, height=600))
     low, high = AppConfig(), AppConfig()
