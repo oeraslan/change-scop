@@ -16,7 +16,9 @@ from core.config import (
 )
 
 
-def test_defaults_point_inside_project():
+def test_defaults_point_inside_project(monkeypatch):
+    monkeypatch.delenv("CHANGESCOPE_MODELS_DIR", raising=False)
+    monkeypatch.delenv("CHANGESCOPE_BIN_DIR", raising=False)
     cfg = AppConfig()
     assert cfg.paths.models_dir == app_root() / "models"
     assert cfg.paths.llama_server_exe == app_root() / "bin" / "llama" / "llama-server.exe"

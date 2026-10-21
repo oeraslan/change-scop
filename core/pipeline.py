@@ -283,10 +283,19 @@ _default_lock = threading.Lock()
 def build_default_pipeline(config: AppConfig | None = None) -> Pipeline:
     """Gerçek modüllerle pipeline kurar.
 
-    Faz 1'de image-registration ve change-detector modülleri, Faz 3'te llm-analyst buraya bağlanır.
+    Modeller burada YÜKLENMEZ; her bileşen ilk kullanımda lazy yükler. LLM (llm-analyst) Faz 3'te
+    `analyst_factory` olarak bağlanacak; şimdilik yok.
     """
-    raise NotImplementedError(
-        "Gerçek modüller henüz bağlanmadı (Faz 1). Testlerde set_default_pipeline() kullanın."
+    from core.detection import create_detector
+    from core.registration import create_preprocessor, create_registrar
+
+    config = config or load_config()
+    return Pipeline(
+        preprocessor=create_preprocessor(config),
+        registrar=create_registrar(config),
+        detector=create_detector(config),
+        analyst_factory=None,
+        config=config,
     )
 
 
