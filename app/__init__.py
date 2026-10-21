@@ -1,0 +1,1 @@
+"""ChangeScope masaüstü uygulaması."""
