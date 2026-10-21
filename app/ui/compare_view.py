@@ -6,8 +6,8 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QImage, QImageReader
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QHBoxLayout,
     QSplitter,
@@ -36,10 +36,10 @@ from app.ui.exporter import export_comparison
 from app.ui.qt_utils import heatmap_to_qimage, rgb_to_qimage
 from app.ui.sync_graphics_view import RegionSpec, SyncGraphicsView, SyncGroup
 from app.ui.theme import ACCENT, EmptyState, Pill, Surface
-from app.ui.workers import ComparisonWorker
+from app.ui.workers import ComparisonWorker, load_preview  # noqa: F401 - load_preview geriye uyumluluk
 from core.contracts import AlignmentQuality, ChangeVerdict, ComparisonResult
 
-PREVIEW_MAX_SIDE = 3000
+_RETIRED: set[ComparisonWorker] = set()   # iptal edilmiş ama henüz bitmemiş worker'lar (referans tutulur)
 
 
 def format_date(iso: str | None) -> str:
@@ -50,18 +50,6 @@ def format_date(iso: str | None) -> str:
         return datetime.fromisoformat(iso).strftime("%d.%m.%Y")
     except ValueError:
         return iso[:10]
-
-
-def load_preview(path: Path, max_side: int = PREVIEW_MAX_SIDE) -> QImage | None:
-    """Büyük dosyaları ölçekleyerek okuyan hızlı önizleme yükleyici."""
-    reader = QImageReader(str(path))
-    reader.setAutoTransform(False)
-    size = reader.size()
-    if size.isValid() and max(size.width(), size.height()) > max_side:
-        k = max_side / max(size.width(), size.height())
-        reader.setScaledSize(size * k)
-    img = reader.read()
-    return None if img.isNull() else img
 
 
 class _Pane(Surface):
@@ -87,6 +75,7 @@ class CompareView(QWidget):
 
     backRequested = Signal()
     resultSaved = Signal(int)       # kaydedilen karşılaştırma id'si (geçmiş listesini yenilemek için)
+    workersIdle = Signal()          # hiçbir arka plan işi kalmadı (ertelenen ayar değişiklikleri için)
 
     def __init__(self, library: Library | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -98,6 +87,7 @@ class CompareView(QWidget):
         self._comparison: ComparisonRecord | None = None
         self._result: ComparisonResult | None = None
         self._worker: ComparisonWorker | None = None
+        self._deferred_start: tuple[bool, bool, bool] | None = None   # (use_llm, loading_ai, force)
         self._infobars: list[InfoBar] = []
         self._model_name = "Gemma 4 12B"
         self._sized = False
@@ -250,7 +240,8 @@ class CompareView(QWidget):
         self.main_splitter.setSizes([total - ai_h, ai_h])
 
     def set_library(self, library: Library | None) -> None:
-        """Kütüphane değiştiğinde (ayarlardan) çağrılır."""
+        """Kütüphane değiştiğinde (ayarlardan) çağrılır; eski kütüphaneyle çalışan iş bırakılır."""
+        self._abort_worker()
         self.library = library
 
     def set_model_name(self, name: str) -> None:
@@ -258,14 +249,26 @@ class CompareView(QWidget):
         self.ai_panel.set_model_name(name)
 
     def is_busy(self) -> bool:
-        """Pipeline şu an çalışıyor mu?"""
-        return self._worker is not None and self._worker.isRunning()
+        """Bu ekranın aktif işi var mı (pipeline / kayıt / önbellek okuma)?"""
+        return self._deferred_start is not None or (self._worker is not None and self._worker.isRunning())
 
-    def shutdown(self) -> None:
-        """Pencere kapanırken çalışan işi iptal edip bekler."""
-        if self._worker is not None:
-            self._worker.cancel()
-            self._worker.wait(5000)
+    def has_running_workers(self) -> bool:
+        """İptal edilmiş olanlar dahil arka planda çalışan herhangi bir iş var mı?"""
+        return self.is_busy() or any(w.isRunning() for w in _RETIRED)
+
+    def shutdown(self, timeout_ms: int = 10000) -> None:
+        """Pencere kapanırken: tüm işleri iptal eder, olay döngüsünü işleterek (UI donmadan) bitmelerini bekler."""
+        import time
+
+        self._deferred_start = None
+        workers = [w for w in [self._worker, *_RETIRED] if w is not None]
+        for w in workers:
+            w.cancel()
+        deadline = time.monotonic() + timeout_ms / 1000
+        while any(w.isRunning() for w in workers) and time.monotonic() < deadline:
+            QApplication.processEvents()
+            for w in workers:
+                w.wait(20)
 
     # ------------------------------------------------------------- dışarıdan API
 
@@ -286,20 +289,11 @@ class CompareView(QWidget):
         self._clear_infobars()
         self.ai_panel.show_off()
         self.export_button.setEnabled(False)
-
-        cached = None if force else self.library.find_comparison(before, after)
-        if cached is not None:
-            try:
-                result = self.library.load_comparison(cached)
-            except Exception as exc:  # noqa: BLE001 - bozuk kayıt: yeniden hesapla
-                self._comparison = None
-                self._info("warning", "Kayıtlı sonuç okunamadı", f"Yeniden hesaplanacak ({exc}).")
-            else:
-                self._comparison = cached
-                self.show_result(result)
-                return
-        self._show_previews(before, after)
-        self._start_worker(self.use_llm if use_llm is None else use_llm, loading_ai=False)
+        for view in (self.before_view, self.after_view):
+            view.set_regions([])
+            view.set_heatmap(None)
+        # Önbellek araması/okuması, önizleme yükleme, pipeline ve kayıt: hepsi worker thread'inde.
+        self._start_worker(self.use_llm if use_llm is None else use_llm, loading_ai=False, force=force)
 
     def open_comparison(self, rec: ComparisonRecord) -> None:
         """Geçmişten kaydedilmiş karşılaştırmayı aç."""
@@ -377,66 +371,79 @@ class CompareView(QWidget):
         self.before_pane.set_label(f"ÖNCE · {format_date(before.captured_at)}")
         self.after_pane.set_label(f"SONRA · {format_date(after.captured_at)}")
 
-    def _show_previews(self, before: ImageRecord, after: ImageRecord) -> None:
-        assert self.library is not None
-        for view, rec in ((self.before_view, before), (self.after_view, after)):
-            view.set_regions([])
-            view.set_heatmap(None)
-            view.set_image(load_preview(self.library.image_path(rec)))
-        QTimer.singleShot(0, self.group.fit_all)
-
     # ---------------------------------------------------------------- işlem
 
-    def _start_worker(self, use_llm: bool, loading_ai: bool) -> None:
+    def _start_worker(self, use_llm: bool, loading_ai: bool, force: bool = True) -> None:
         assert self._before_rec and self._after_rec and self.library
-        worker = ComparisonWorker(
-            self.library.to_image_input(self._before_rec),
-            self.library.to_image_input(self._after_rec), use_llm, self,
-        )
-        worker.progress.connect(self._on_progress)
-        worker.succeeded.connect(self._on_success)
-        worker.cancelled.connect(self._on_cancelled)
-        worker.unavailable.connect(self._on_unavailable)
-        worker.failed.connect(self._on_failed)
-        worker.finished.connect(self._on_worker_finished)
-        self._worker = worker
         self._set_progress_visible(True)
         self.progress_bar.setValue(0)
-        self.stage_label.setText("Başlatılıyor…")
         self.export_button.setEnabled(False)
         if loading_ai:
             self.ai_panel.show_loading()
+        if any(w.isRunning() for w in _RETIRED):
+            # Önceki (iptal edilmiş) iş modelleri bırakana kadar bekle; çakışma olmasın.
+            self._deferred_start = (use_llm, loading_ai, force)
+            self.stage_label.setText("Önceki işlem durduruluyor…")
+            return
+        self._launch(use_llm, loading_ai, force)
+
+    def _launch(self, use_llm: bool, loading_ai: bool, force: bool) -> None:
+        assert self._before_rec and self._after_rec and self.library
+        worker = ComparisonWorker(
+            self.library, self._before_rec, self._after_rec, use_llm, force=force,
+            load_previews=not loading_ai,
+        )
+        worker.previews.connect(self._on_previews)
+        worker.progress.connect(self._on_progress)
+        worker.succeeded.connect(self._on_success)
+        worker.cancelled.connect(self._on_cancelled)
+        worker.failed.connect(self._on_failed)
+        worker.finished.connect(self._on_worker_finished)
+        self._worker = worker
+        self.stage_label.setText("Başlatılıyor…")
         worker.start()
 
     def interpret(self) -> None:
         """"Yorumla": AI yorumunu (LLM açık) sonradan çalıştırır."""
         if self._before_rec is None or self._after_rec is None or self.is_busy():
             return
+        if not self.ai_panel.interpret_enabled():
+            return
         self._clear_infobars(keep=("weak", "failed"))
         self._start_worker(True, loading_ai=True)
 
     def cancel(self) -> None:
-        """Çalışan karşılaştırmayı iptal eder."""
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.cancel()
-            self.stage_label.setText("İptal ediliyor…")
-            self.cancel_button.setEnabled(False)
+        """Çalışan karşılaştırmayı iptal eder; UI beklemeden "İptal edildi" durumuna geçer."""
+        if self.is_busy():
+            self._abort_worker()
+            self._on_cancelled()
 
     def _abort_worker(self) -> None:
-        if self._worker is not None:
-            for sig in ("progress", "succeeded", "cancelled", "unavailable", "failed"):
+        """Worker'ı bloklamadan bırakır: sinyalleri keser, iptal ister, bitene kadar referansı tutar."""
+        self._deferred_start = None
+        worker, self._worker = self._worker, None
+        if worker is not None:
+            for sig in ("previews", "progress", "succeeded", "cancelled", "failed"):
                 try:
-                    getattr(self._worker, sig).disconnect()
+                    getattr(worker, sig).disconnect()
                 except (TypeError, RuntimeError):
                     pass
-            self._worker.cancel()
-            self._worker.wait(5000)
-            self._worker = None
+            worker.cancel()
+            if worker.isRunning():
+                _RETIRED.add(worker)       # finished -> _on_worker_finished -> deleteLater
+            else:
+                worker.deleteLater()
         self._set_progress_visible(False)
 
     def _set_progress_visible(self, visible: bool) -> None:
         self.progress_host.setVisible(visible)
         self.cancel_button.setEnabled(True)
+
+    def _on_previews(self, before_img, after_img) -> None:
+        for view, img in ((self.before_view, before_img), (self.after_view, after_img)):
+            if img is not None and self._result is None:
+                view.set_image(img)
+        QTimer.singleShot(0, self.group.fit_all)
 
     def _on_progress(self, stage: str, fraction: float, message: str) -> None:
         self.progress_bar.setValue(int(max(0.0, min(1.0, fraction)) * 1000))
@@ -444,15 +451,14 @@ class CompareView(QWidget):
         if stage.startswith("llm") and self.ai_panel.state() != "loading":
             self.ai_panel.show_loading()
 
-    def _on_success(self, result: ComparisonResult) -> None:
+    def _on_success(self, result: ComparisonResult, record, cached: bool, save_error: str) -> None:
         self._set_progress_visible(False)
+        self._comparison = record
         self.show_result(result)
-        if self.library and self._before_rec and self._after_rec:
-            try:
-                self._comparison = self.library.save_comparison(self._before_rec, self._after_rec, result)
-                self.resultSaved.emit(self._comparison.id)
-            except Exception as exc:  # noqa: BLE001
-                self._info("warning", "Sonuç kaydedilemedi", str(exc))
+        if save_error:
+            self._info("warning", "Sonuç kaydedilemedi", save_error)
+        elif record is not None and not cached:
+            self.resultSaved.emit(record.id)
 
     def _on_cancelled(self) -> None:
         self._set_progress_visible(False)
@@ -462,13 +468,6 @@ class CompareView(QWidget):
             self.export_button.setEnabled(True)
         else:
             self.ai_panel.show_off()
-
-    def _on_unavailable(self, message: str) -> None:
-        self._set_progress_visible(False)
-        self._info("error", "Analiz modülleri henüz kurulu değil",
-                   "Hizalama ve fark tespiti modülleri bu sürümde bağlı değil; görüntüler yalnızca önizleniyor.",
-                   key="unavailable")
-        self.ai_panel.show_off()
 
     def _on_failed(self, message: str) -> None:
         self._set_progress_visible(False)
@@ -483,7 +482,13 @@ class CompareView(QWidget):
         if worker is self._worker:
             self._worker = None
         if worker is not None:
+            _RETIRED.discard(worker)        # type: ignore[arg-type]
             worker.deleteLater()
+        if self._deferred_start is not None and not any(w.isRunning() for w in _RETIRED):
+            args, self._deferred_start = self._deferred_start, None
+            self._launch(*args)
+        elif not self.has_running_workers():
+            self.workersIdle.emit()
 
     # ----------------------------------------------------------------- anahtarlar
 

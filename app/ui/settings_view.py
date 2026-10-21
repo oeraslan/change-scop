@@ -23,6 +23,8 @@ from core.config import AppConfig, save_config
 
 THEME_TEXTS = ["Koyu", "Açık", "Sistem"]
 TILE_SIZES = [512, 768, 1024, 1536, 2048]
+DEVICES = ["auto", "cuda", "cpu"]
+DEVICE_TEXTS = ["Otomatik", "GPU (CUDA)", "CPU"]
 
 
 class SettingsView(QWidget):
@@ -32,6 +34,8 @@ class SettingsView(QWidget):
     libraryDirChanged = Signal(object)      # Path
     llmEnabledChanged = Signal(bool)
     settingsSaved = Signal()
+    pipelineSettingsChanged = Signal()      # hassasiyet / tile / LLM / cihaz: pipeline yeniden kurulmalı
+    deviceChanged = Signal(str)
 
     def __init__(
         self, config: AppConfig, prefs: UiPrefs, config_path: Path | None = None,
@@ -43,8 +47,8 @@ class SettingsView(QWidget):
         self._config_path, self._prefs_path = config_path, prefs_path
 
         title = TitleLabel("Ayarlar", self)
-        note = BodyLabel("Değişiklikler anında kaydedilir. Hassasiyet ve tile boyutu bir sonraki "
-                         "karşılaştırmalarda geçerli olur.", self)
+        note = BodyLabel("Değişiklikler anında kaydedilir. Hassasiyet, tile boyutu, cihaz ve yapay zekâ "
+                         "ayarları bir sonraki karşılaştırmada otomatik uygulanır (çalışan işlem bitince).", self)
         note.setTextColor("#6b7280", "#9aa3b2")
 
         # Tema
@@ -94,6 +98,17 @@ class SettingsView(QWidget):
                                "Büyük görüntüler bu boyuttaki parçalara bölünerek işlenir (%10 örtüşmeli).",
                                self.tile_combo)
 
+        # Cihaz
+        self.device_combo = ComboBox(self)
+        self.device_combo.addItems(DEVICE_TEXTS)
+        dev = config.runtime.device
+        self.device_combo.setCurrentIndex(DEVICES.index(dev) if dev in DEVICES else 0)
+        self.device_combo.setFixedWidth(160)
+        self.device_combo.currentIndexChanged.connect(self._on_device)
+        device_card = self._card(FIF.SPEED_HIGH, "İşlem cihazı",
+                                 "Eşleştirme ve fark modelleri için GPU/CPU seçimi (Otomatik: GPU varsa GPU).",
+                                 self.device_combo)
+
         host = QWidget(self)
         lay = QVBoxLayout(host)
         lay.setContentsMargins(36, 16, 36, 24)
@@ -101,7 +116,7 @@ class SettingsView(QWidget):
         lay.addWidget(title)
         lay.addWidget(note)
         lay.addSpacing(16)
-        for card in (theme_card, self.library_card, llm_card, sens_card, tile_card):
+        for card in (theme_card, self.library_card, llm_card, sens_card, tile_card, device_card):
             lay.addWidget(card)
         lay.addStretch(1)
 
@@ -148,12 +163,21 @@ class SettingsView(QWidget):
         self.config.llm.enabled = on
         self._save()
         self.llmEnabledChanged.emit(on)
+        self.pipelineSettingsChanged.emit()
 
     def _on_sensitivity(self, value: int) -> None:
         self.sens_label.setText(f"%{value}")
         self.config.detection.sensitivity = value / 100.0
         self._save()
+        self.pipelineSettingsChanged.emit()
 
     def _on_tile(self, index: int) -> None:
         self.config.registration.tile_size_px = TILE_SIZES[index]
         self._save()
+        self.pipelineSettingsChanged.emit()
+
+    def _on_device(self, index: int) -> None:
+        self.config.runtime.device = DEVICES[index]  # type: ignore[assignment]
+        self._save()
+        self.deviceChanged.emit(DEVICES[index])
+        self.pipelineSettingsChanged.emit()
