@@ -29,6 +29,7 @@ CHROMA_SCALE = 30.0      # deadzone üstünde bu kadar fark -> terim azami
 
 MIN_AREA_FRACTION = 4e-4   # geçerli alanın bu oranı: min bölge alanı; YALNIZCA çalışma küçültmesi varken uygulanır
 SMALL_AREA_FRACTION = 4e-4   # küçük görüntülerde min alan = min(config, bu oran x geçerli alan)
+SMALL_REGION_MIN_SCORE = 0.45   # config min alanının altındaki bölgeler için asgari skor
 MIN_AREA_FLOOR_PX = 35       # mutlak alt sınır
 SCALE_COMPENSATE_FROM = 1.2   # etkin büyütme bu değerin üstündeyse çözünürlük eşitlenir
 MAX_REGIONS_RELIABLE = 40  # bundan fazla bölge -> sonuç güvenilmez işaretlenir
@@ -371,6 +372,9 @@ class SsimChangeDetector:
             sub = (filled > 0) & safe[y:y + h, x:x + w]
             area = int(sub.sum())
             score = float(np.clip(change[y:y + h, x:x + w][sub].mean(), 0.0, 1.0))
+            # Config tabanının altındaki (küçük görüntüye özel gevşetilmiş) bölgeler güçlü olmalı
+            if area < c.min_region_area_px and score < SMALL_REGION_MIN_SCORE:
+                continue
             found.append((score, BoundingBox(x, y, w, h), sub, area))
         found.sort(key=lambda t: t[0], reverse=True)
         return [
