@@ -40,6 +40,7 @@ class ComparisonWorker(QThread):
 
     Sinyaller (UI thread'ine kuyruklanır):
         previews(before_qimage, after_qimage)   pipeline başlamadan önce (önbellekte yoksa)
+        partial(result)                         LLM açıkken CV sonucu hazır olunca (llm_used=False)
         progress(stage, fraction, message)
         succeeded(result, record, cached, save_error)
         cancelled()
@@ -47,6 +48,7 @@ class ComparisonWorker(QThread):
     """
 
     previews = Signal(object, object)
+    partial = Signal(object)
     progress = Signal(str, float, str)
     succeeded = Signal(object, object, bool, str)
     cancelled = Signal()
@@ -55,16 +57,23 @@ class ComparisonWorker(QThread):
     def __init__(
         self, library, before_rec, after_rec, use_llm: bool, force: bool = False,
         load_previews: bool = True, use_cache: bool = True, parent=None,
+        interpret_result: ComparisonResult | None = None,
     ) -> None:
         super().__init__(parent)
         self._library, self._before_rec, self._after_rec = library, before_rec, after_rec
         self._use_llm, self._force = use_llm, force
         self._load_previews, self._use_cache = load_previews, use_cache
+        self._interpret_result = interpret_result       # verilmişse yalnızca LLM yorumu ("Yorumla")
         self.cancel_event = threading.Event()
 
     def cancel(self) -> None:
         """İptal ister; pipeline aşamalar arasında `ComparisonCancelled` fırlatır."""
         self.cancel_event.set()
+
+    def _on_cv_result(self, partial: ComparisonResult) -> None:
+        """Pipeline thread'inden: CV sonucu hazır (LLM henüz çalışmadı)."""
+        if not self.cancel_event.is_set():
+            self.partial.emit(partial)
 
     def _report(self, stage: str, fraction: float, message: str = "") -> None:
         self.progress.emit(stage, float(fraction), message)
@@ -87,8 +96,33 @@ class ComparisonWorker(QThread):
             log.warning("Kayıtlı sonuç okunamadı (%s); yeniden hesaplanacak", exc)
             return None
 
+    def _save(self, result: ComparisonResult, mask_hash: str | None):
+        """Sonucu kaydeder; (kayıt, hata metni) döndürür."""
+        try:
+            return self._library.save_comparison(
+                self._before_rec, self._after_rec, result, mask_hash=mask_hash), ""
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Sonuç kaydedilemedi")
+            return None, str(exc)
+
+    def _run_interpret(self) -> None:
+        """Var olan CV sonucunu yalnızca LLM ile yorumlar ve kaydeder (hizalama/tespit tekrarlanmaz)."""
+        assert self._interpret_result is not None
+        result = core_pipeline.interpret_comparison(self._interpret_result, self._report, self.cancel_event)
+        if self.cancel_event.is_set():
+            self.cancelled.emit()
+            return
+        record, save_error = self._save(result, None)   # None: görüntünün güncel maske özeti
+        if self.cancel_event.is_set():
+            self.cancelled.emit()
+        else:
+            self.succeeded.emit(result, record, False, save_error)
+
     def run(self) -> None:
         try:
+            if self._interpret_result is not None:
+                self._run_interpret()
+                return
             hit = self._try_cached()
             if hit is not None:
                 if self.cancel_event.is_set():
@@ -107,17 +141,12 @@ class ComparisonWorker(QThread):
                 self._library.to_image_input(self._before_rec),
                 self._library.to_image_input(self._after_rec),
                 self._report, self._use_llm, cancel=self.cancel_event, ignore_mask=mask,
+                on_cv_result=self._on_cv_result if self._use_llm else None,
             )
             if self.cancel_event.is_set():
                 self.cancelled.emit()
                 return
-            record, save_error = None, ""
-            try:
-                record = self._library.save_comparison(
-                    self._before_rec, self._after_rec, result, mask_hash=mask_hash)
-            except Exception as exc:  # noqa: BLE001
-                log.exception("Sonuç kaydedilemedi")
-                save_error = str(exc)
+            record, save_error = self._save(result, mask_hash)
             if self.cancel_event.is_set():
                 self.cancelled.emit()
             else:

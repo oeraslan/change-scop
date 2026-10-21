@@ -299,6 +299,7 @@ def test_interpret_enabled_when_model_and_server_exist(window, tmp_path: Path) -
     gguf = cfg.llm.model_spec.gguf_path(models)
     gguf.parent.mkdir(parents=True)
     gguf.write_bytes(b"x")
+    cfg.llm.model_spec.mmproj_path(models).write_bytes(b"x")
     bin_dir = tmp_path / "bin"
     (bin_dir / "llama").mkdir(parents=True)
     (bin_dir / "llama" / "llama-server.exe").write_bytes(b"x")

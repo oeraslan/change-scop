@@ -250,8 +250,10 @@ def test_export_without_boxes_when_switch_off(cv, tmp_path: Path) -> None:
 
 # -------------------------------------------------------- uçtan uca: pipeline + kayıt + önbellek
 
-def test_open_pair_runs_pipeline_saves_and_reuses_cache(window, populated, qtbot) -> None:
+def test_open_pair_runs_pipeline_saves_and_reuses_cache(window, populated, qtbot, tmp_path) -> None:
     library, _, recs = populated
+    from tests.ui.test_phase3_llm import _enable_llm
+    _enable_llm(window, tmp_path)           # LLM yalnızca model + exe mevcutsa otomatik çalışır
     registrar = InstantRegistrar()
     calls = []
     original = registrar.register
@@ -260,7 +262,6 @@ def test_open_pair_runs_pipeline_saves_and_reuses_cache(window, populated, qtbot
     set_default_pipeline(Pipeline(InstantPreprocessor(), registrar, InstantDetector(),
                                   analyst_factory=lambda: InstantAnalyst(), config=config))
     cv = window.compare_view
-    cv.use_llm = True
     window.open_compare(recs[0], recs[1])
     assert cv.progress_host.isVisible()                      # ilerleme çubuğu hemen görünür
     qtbot.waitUntil(lambda: cv._result is not None, timeout=15000)
@@ -345,13 +346,13 @@ def test_pipeline_error_shows_error_infobar(window, populated, qtbot) -> None:
     _wait_idle(qtbot, cv)
 
 
-def test_interpret_button_runs_llm_later(window, populated, qtbot) -> None:
+def test_interpret_button_runs_llm_later(window, populated, qtbot, tmp_path) -> None:
     _, _, recs = populated
+    from tests.ui.test_phase3_llm import _enable_llm
+    _enable_llm(window, tmp_path)                           # model + exe var: "Yorumla" etkin
     set_default_pipeline(make_pipeline())
     cv = window.compare_view
-    window.config.llm.enabled = False                       # LLM kapalı: açılışta yorum yok
-    cv.ai_panel.set_interpret_available(True)               # (worktree'de model yok; düğmeyi zorla etkinleştir)
-    window.open_compare(recs[0], recs[1])
+    cv.open_pair(recs[0], recs[1], use_llm=False)           # açılışta yorum yok
     qtbot.waitUntil(lambda: cv._result is not None, timeout=15000)
     _wait_idle(qtbot, cv)
     assert cv.ai_panel.state() == "off"
