@@ -15,6 +15,7 @@ from core.llm.analyst import (
     expanded_box,
     make_crop,
     parse_verdict,
+    strip_frame_phrases,
 )
 from tests.llm.conftest import FakeServer, make_analyst, make_scene
 
@@ -217,3 +218,37 @@ def test_release_calls_server_stop():
     analyst, fake = make_analyst("http://x")
     analyst.release()
     assert fake.stop_calls == 1
+
+
+def test_strip_frame_phrases():
+    assert strip_frame_phrases("Çerçevenin içinde kırmızı bir nesne eklenmiş.") == "Kırmızı bir nesne eklenmiş."
+    assert strip_frame_phrases("Çerçeve içinde yeni bina var.") == "Yeni bina var."
+    assert strip_frame_phrases("Sarı çerçevenin içerisinde, araç görünüyor.") == "Araç görünüyor."
+    assert strip_frame_phrases("İşaretli alanda yeni bir yol var.") == "Yeni bir yol var."
+    assert strip_frame_phrases("Yeni bir bina eklenmiş.") == "Yeni bir bina eklenmiş."
+    p = parse_verdict('{"verdict":"real_change","description":"Çerçevenin içinde top var.","confidence":1}')
+    assert p.description == "Top var."
+
+
+def test_progress_callback(mock_llm, scene):
+    srv = mock_llm(default=GOOD)
+    analyst, _ = make_analyst(srv.url, max_regions=2)
+    calls = []
+    analyst.progress_callback = lambda d, t, m: calls.append((d, t, m))
+    reg, det = scene
+    analyst.analyze(reg, det)
+    assert calls[0] == (0, 2, "Yapay zekâ modeli yükleniyor…")
+    assert calls[1:] == [(1, 2, "Bölge 1/2 yorumlandı"), (2, 2, "Bölge 2/2 yorumlandı")]
+
+
+def test_progress_callback_exception_is_ignored(mock_llm, scene):
+    srv = mock_llm(default=GOOD)
+    analyst, _ = make_analyst(srv.url)
+
+    def boom(*a):
+        raise RuntimeError("ui")
+
+    analyst.progress_callback = boom
+    reg, det = scene
+    analyst.analyze(reg, det)
+    assert all(r.verdict == ChangeVerdict.REAL_CHANGE for r in det.regions)
