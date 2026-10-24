@@ -20,3 +20,5 @@ tests/data/synthetic/
 
 .venv-cpu/
 /exeler/
+/tests/ui/screenshots/
+/tests/integration/screenshots/
