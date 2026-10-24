@@ -18,3 +18,7 @@ tests/data/synthetic/
 /karsilastirma*.csv
 /karsilastirma*.txt
 !packaging/*.spec
+/tests/ui/screenshots/
+/tests/integration/screenshots/
+/exeler/
+.venv-cpu/
