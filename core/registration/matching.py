@@ -52,6 +52,50 @@ def _local_state_dict_loader(config: AppConfig):
     return loader
 
 
+def _max_pool_cv2(x, nms_radius: int):
+    """CPU'da `max_pool2d(kernel=2r+1, stride=1, padding=r)` ile birebir aynı sonuç, OpenCV `dilate` ile.
+
+    `dilate`'in varsayılan sınır değeri -∞'dur (max_pool2d'nin dolgusu gibi). x: (..., H, W) float tensör.
+    """
+    import torch
+
+    k = np.ones((2 * nms_radius + 1, 2 * nms_radius + 1), np.uint8)
+    flat = x.reshape(-1, *x.shape[-2:]).numpy()
+    out = np.stack([cv2.dilate(np.ascontiguousarray(m), k) for m in flat])
+    return torch.from_numpy(out.reshape(x.shape))
+
+
+def fast_simple_nms(scores, nms_radius: int):
+    """`lightglue.superpoint.simple_nms`'in CPU'da hızlı eşdeğeri (GPU'da özgün sürüm kullanılır).
+
+    PyTorch'un CPU `max_pool2d`'si büyük çekirdekte çok yavaştır (1024 px'te ~0.2 s/çağrı, eşleştirme başına
+    onlarca çağrı); `cv2.dilate` aynı sonucu milisaniyelerde verir.
+    """
+    import torch
+    from lightglue import superpoint as sp
+
+    original = getattr(sp, "_changescope_original_nms", sp.simple_nms)
+    if scores.device.type != "cpu" or scores.dtype != torch.float32:
+        return original(scores, nms_radius)
+    zeros = torch.zeros_like(scores)
+    max_mask = scores == _max_pool_cv2(scores, nms_radius)
+    for _ in range(2):
+        supp_mask = _max_pool_cv2(max_mask.float(), nms_radius) > 0
+        supp_scores = torch.where(supp_mask, zeros, scores)
+        new_max_mask = supp_scores == _max_pool_cv2(supp_scores, nms_radius)
+        max_mask = max_mask | (new_max_mask & (~supp_mask))
+    return torch.where(max_mask, scores, zeros)
+
+
+def _install_fast_cpu_nms() -> None:
+    """SuperPoint'in NMS'ini (bir kez) hızlı CPU sürümüyle değiştirir."""
+    from lightglue import superpoint as sp
+
+    if not hasattr(sp, "_changescope_original_nms"):
+        sp._changescope_original_nms = sp.simple_nms
+        sp.simple_nms = fast_simple_nms
+
+
 class LightGlueMatcher:
     """SuperPoint + LightGlue; ağırlıklar yalnızca `models/` altından yüklenir."""
 
@@ -61,6 +105,7 @@ class LightGlueMatcher:
         import torch
         from lightglue import LightGlue, SuperPoint
 
+        _install_fast_cpu_nms()
         self.torch = torch
         self.device = device
         n_kp = config.registration.max_keypoints

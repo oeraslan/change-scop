@@ -228,7 +228,7 @@ def _start_run(race_files, out: dict):
     def target():
         try:
             out["result"] = core_pipeline.run_comparison(ImageInput(before), ImageInput(after),
-                                                         lambda *a, **k: None, False)
+                                                         lambda *a, **k: None)
         except BaseException as exc:  # noqa: BLE001
             out["error"] = exc
 
@@ -303,7 +303,7 @@ def test_configure_and_runs_stress_no_exceptions(default_pipeline_state, tmp_pat
         try:
             for _ in range(2):
                 results.append(core_pipeline.run_comparison(ImageInput(before), ImageInput(after),
-                                                            lambda *a, **k: None, False))
+                                                            lambda *a, **k: None))
         except BaseException as exc:  # noqa: BLE001
             errors.append(exc)
 

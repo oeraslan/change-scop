@@ -1,6 +1,6 @@
 ---
 name: desktop-ui
-description: app/ altındaki modern PySide6 masaüstü arayüzünü ve app/storage kütüphane katmanını geliştirir. Klasör ağacı, görüntü galerisi, yan yana karşılaştırma ekranı, AI yorum paneli. Arayüz işlerinde kullan.
+description: app/ altındaki modern PySide6 masaüstü arayüzünü ve app/storage kütüphane katmanını geliştirir. Klasör ağacı, görüntü galerisi, yan yana karşılaştırma ekranı, sonuç paneli (eşleşme yüzdesi). Arayüz işlerinde kullan.
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
 isolation: worktree
@@ -12,7 +12,7 @@ Hedef: Windows 11 hissi veren, "sıkıcı form ekranı" OLMAYAN, Lightroom / Goo
 - SADECE `app/` ve `tests/ui/` altında dosya yaz (`app/storage/` dahil).
 - `core/contracts.py`'yi DEĞİŞTİREMEZSİN. Pipeline'a SADECE şu imzayla bağlan
   (ana oturum `core/pipeline.py`'de yazar; test için sahte pipeline yazabilirsin):
-  `run_comparison(before: ImageInput, after: ImageInput, progress: ProgressCallback, use_llm: bool) -> ComparisonResult`
+  `run_comparison(before: ImageInput, after: ImageInput, progress: ProgressCallback, cancel=None, ignore_mask=None) -> ComparisonResult`
 
 ## Görsel dil (ZORUNLU)
 - Kütüphane: **PySide6-Fluent-Widgets** (`PySide6-Fluent-Widgets`, Windows 11 Fluent tasarımı;
@@ -20,8 +20,8 @@ Hedef: Windows 11 hissi veren, "sıkıcı form ekranı" OLMAYAN, Lightroom / Goo
   varsayılan Qt görünümü KESİNLİKLE kullanılmaz.
 - Koyu tema varsayılan, açık tema seçeneği. Mica/akrilik arka plan efekti (destekleniyorsa).
 - Yuvarlatılmış köşeler (8 px), yumuşak gölgeler, bol boşluk, 8 px grid.
-- Vurgu rengi tek bir renk (ör. camgöbeği #22D3EE). Durum renkleri: gerçek değişiklik kırmızı
-  #F43F5E, yanlış alarm gri #94A3B8, belirsiz amber #F59E0B, incelenmedi mavi #60A5FA.
+- Vurgu rengi tek bir renk (ör. camgöbeği #22D3EE). Değişiklik kutuları kırmızı #F43F5E. Eşleşme yüzdesi
+  rengi: ≥%60 yeşil #34D399, ≥%30 amber #F59E0B, altı kırmızı.
 - Yazı tipi: Segoe UI Variable (Windows yerleşik). Başlıklar 600 ağırlık.
 - İkonlar: Fluent ikon seti. Geçişlerde kısa animasyonlar (150–250 ms), hover efektleri.
 - Boş durumlar (empty state) güzel tasarlanmış olsun: ikon + açıklama + aksiyon butonu.
@@ -35,7 +35,7 @@ Hedef: Windows 11 hissi veren, "sıkıcı form ekranı" OLMAYAN, Lightroom / Goo
   - `comparisons(id, folder_id, before_image_id, after_image_id, result_dir, quality, region_count, summary, created_at)`
 - Görüntü içe aktarılınca kütüphaneye KOPYALANIR (orijinale dokunulmaz) ve 320 px thumbnail üretilir.
   Çekim tarihi EXIF'ten okunur; yoksa kullanıcıya sorulur (varsayılan: dosya tarihi).
-- Karşılaştırma sonuçları (`change_map`, bölgeler, AI yorumları) `result_dir` altına kaydedilir;
+- Karşılaştırma sonuçları (`change_map`, bölgeler, hizalama sayaçları) `result_dir` altına kaydedilir;
   aynı karşılaştırma tekrar açılınca yeniden hesaplanmaz.
 - Tüm veritabanı işlemleri `LibraryRepository` sınıfında; UI doğrudan SQL yazmaz.
 
@@ -60,43 +60,39 @@ Hedef: Windows 11 hissi veren, "sıkıcı form ekranı" OLMAYAN, Lightroom / Goo
 │     (kutular: ⬚1 ⬚2 ⬚3)      │        (aynı kutular aynı yerde)      │
 │                              │                                       │
 ├──────────────────────────────┴───────────────────────────────────────┤
-│ 🤖 Yapay zekâ yorumu                                    Gemma 4 12B  │
-│ Genel özet: Kuzeydoğuda yeni bir yapı inşa edilmiş, yol kenarındaki  │
-│ iki araç artık yok. Batıdaki farklar gölge kaynaklı.                 │
-│ ┌────────┐ ┌────────┐ ┌────────┐                                     │
-│ │#1 Yeni │ │#2 Araç │ │#3 Gölge│  ← yatay kaydırılabilir bölge kartları│
-│ │ yapı   │ │kaybolmuş│ │(yanlış)│                                     │
-│ └────────┘ └────────┘ └────────┘                                     │
+│ ⌕ Karşılaştırma sonucu                               [Hizalama iyi]  │
+│  ╭────╮  335 / 441 tutarlı eşleşme   %1.4 değişen alan               │
+│  │%76 │  2 bölge   %89 örtüşen alan   10.2 sn                        │
+│  ╰────╯  ┌────────┐ ┌────────┐  ← yatay kaydırılabilir bölge kartları │
+│          │#1 önce/sonra│ │#2 …    │                                  │
+│          └────────┘ └────────┘                                       │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 - **Yan yana iki görüntü**, `QGraphicsView`. Sağdaki görüntü `after_warped` (hizalanmış) gösterilir,
   böylece kutular iki tarafta da aynı koordinatta durur. **Zoom ve pan iki görünüm arasında senkron.**
   Mouse wheel zoom, sürükle pan, çift tık "sığdır".
 - **"Farkları göster" anahtarı (ToggleSwitch):** Açıkken iki görüntüde de bölge kutuları ve numaraları
-  çizilir (renk = verdict rengi, yarı saydam dolgu + net kenar). Kapalıyken HİÇBİR işaret görünmez,
+  çizilir (kırmızı, yarı saydam dolgu + net kenar). Kapalıyken HİÇBİR işaret görünmez,
   sadece saf görüntüler. Varsayılan: açık. Geçiş yumuşak (opacity animasyonu).
 - **"Isı haritası" anahtarı:** Ayrı, varsayılan kapalı. Açılınca `change_map` yarı saydam overlay.
-- **"Yanlış alarmları gizle"** seçeneği (araç çubuğunda).
-- Görüntü üzerinde bir kutuya hover → tooltip (açıklama + skor). Tıklayınca alttaki ilgili kart vurgulanır;
+- Görüntü üzerinde bir kutuya hover → tooltip (numara + skor + alan). Tıklayınca alttaki ilgili kart vurgulanır;
   karta tıklayınca iki görüntü o bölgeye animasyonla zoom yapar.
-- **Alt panel – Yapay zekâ yorumu:** Yüksekliği sürüklenebilir (splitter), daraltılabilir.
-  - Üstte `ComparisonResult.summary` (genel özet) paragrafı.
-  - Altında her bölge için kart: numara, verdict rozeti, kısa açıklama, güven yüzdesi, küçük önce/sonra crop.
-  - LLM kapalı/hazır değilse: "Yapay zekâ yorumu kapalı" boş durumu + "Yorumla" butonu (sonradan çalıştırır).
-  - LLM çalışırken skeleton/shimmer yükleme animasyonu.
+- **Alt panel – Karşılaştırma sonucu:** Yüksekliği sürüklenebilir (splitter), daraltılabilir.
+  - Solda hizalama eşleşme yüzdesi (`RegistrationResult.match_percent`) halka gösterge + istatistikler.
+  - Sağda her bölge için kart: numara, skor, alan, küçük önce/sonra crop.
+  - Başlıkta ayrıca "Eşleşme %N" rozeti.
 - **Hizalama kalitesi:** `WEAK` → üstte sarı InfoBar uyarısı; `FAILED` → kırmızı InfoBar, görüntüler
   yan yana gösterilir ama fark işaretlenmez.
 - **Dışa aktar (⤓):** Kutulu yan yana görüntü PNG + bölge listesi CSV + özet metni.
 
 ## 4. İşlem sırasında
 - Karşılaştır'a basınca karşılaştırma ekranı hemen açılır; görüntüler gösterilir, üstte ince ilerleme
-  çubuğu ve aşama metni (Eşleştiriliyor… / Hizalanıyor… / Farklar bulunuyor… / Yapay zekâ yorumluyor…),
+  çubuğu ve aşama metni (Eşleştiriliyor… / Hizalanıyor… / Farklar bulunuyor…),
   iptal butonu. Pipeline `QThreadPool`/`QThread` içinde; UI ASLA donmaz.
-- Önce CV sonuçları gelince kutular çizilir; AI yorumu sonradan gelir ve alt panel güncellenir.
 
 ## 5. Durum çubuğu ve ayarlar
-- Durum çubuğu: "Gemma: hazır / yükleniyor / kapalı", GPU/CPU bilgisi.
-- Ayarlar sayfası: tema, kütüphane konumu, LLM aç/kapa, hassasiyet kaydırıcısı (eşik), tile boyutu.
+- Durum çubuğu: kütüphane özeti, GPU/CPU bilgisi.
+- Ayarlar sayfası: tema, kütüphane konumu, hassasiyet kaydırıcısı (eşik), fark yöntemi, tile boyutu, cihaz.
 
 ## Teknik
 - numpy → `QImage` dönüşümünde veriyi kopyala (bellek sahipliği).

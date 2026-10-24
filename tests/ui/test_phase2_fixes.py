@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from core.contracts import BoundingBox, ChangeRegion, ChangeVerdict
+from core.contracts import BoundingBox, ChangeRegion
 from tests.ui.helpers import make_result
 
 
 def _partial_result():
-    res = make_result(640, 480, with_llm=True)
+    res = make_result(640, 480)
     vm = np.ones((480, 640), bool)
     vm[:, :134] = False                      # ~%21 örtüşmüyor
     res.registration.valid_mask = vm
@@ -19,22 +19,21 @@ def _partial_result():
 def test_cards_strip_scrolls_to_last_card(window, qtbot) -> None:
     view = window.compare_view
     window.switchTo(view)
-    res = make_result(640, 480, with_llm=True)
+    res = make_result(640, 480)
     base = res.detection.regions
     regions = []
     for i in range(1, 21):
         b = base[(i - 1) % 3].bbox
         regions.append(ChangeRegion(region_id=i, bbox=BoundingBox(b.x, b.y, b.width, b.height),
-                                    mask=np.ones((b.height, b.width), bool), score=0.5, area_px=b.width * b.height,
-                                    verdict=ChangeVerdict.REAL_CHANGE, description=f"Bölge {i}", llm_confidence=0.8))
+                                    mask=np.ones((b.height, b.width), bool), score=0.5, area_px=b.width * b.height))
     res.detection.regions = regions
     view.show_result(res)
     window.resize(1200, 800)
     window.show()
-    scroll = view.ai_panel.scroll
+    scroll = view.result_panel.scroll
     qtbot.waitUntil(lambda: scroll.horizontalScrollBar().maximum() > 0)
-    view.ai_panel.highlight(20)
-    last = view.ai_panel.cards()[20]
+    view.result_panel.highlight(20)
+    last = view.result_panel.cards()[20]
     qtbot.waitUntil(lambda: scroll.viewport().rect().contains(last.mapTo(scroll.viewport(), last.rect().center())))
 
 
@@ -54,6 +53,6 @@ def test_overlap_infobar_and_full_overlap_has_no_overlay(window) -> None:
     window.switchTo(view)
     view.show_result(_partial_result())
     assert any("örtüşüyor" in t for _k, t in view.active_infobars())
-    view.show_result(make_result(640, 480, with_llm=True))
+    view.show_result(make_result(640, 480))
     assert not any("örtüşüyor" in t for _k, t in view.active_infobars())
     assert not view.before_view.invalid_overlay_visible()

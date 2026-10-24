@@ -21,7 +21,6 @@ from core.contracts import (
     AlignmentQuality,
     BoundingBox,
     ChangeRegion,
-    ChangeVerdict,
     DetectionResult,
     ImageInput,
     ImageSource,
@@ -29,12 +28,6 @@ from core.contracts import (
     RegistrationResult,
 )
 from core.pipeline import Pipeline, set_default_pipeline
-
-DEMO_SUMMARY = (
-    "Kuzeydoğuda yeni bir yapı inşa edilmiş, yol kenarındaki araç artık yok. "
-    "Batıdaki farklar gölge ve parlaklık kaynaklı olup gerçek değişiklik değildir."
-)
-
 
 class DemoPreprocessor:
     """Dosyayı RGB uint8 olarak okur (denoise yok)."""
@@ -114,38 +107,11 @@ class DemoDetector:
         return DetectionResult(cmap, regions, "demo-diff", {"otsu": float(otsu), "method_requested": AppConfig().detection.method})
 
 
-class DemoAnalyst:
-    """Skora göre sahte verdict/açıklama atar (yalnızca demo)."""
-
-    def is_available(self) -> bool:
-        return True
-
-    def analyze(self, registration: RegistrationResult, detection: DetectionResult) -> DetectionResult:
-        time.sleep(0.8)
-        texts = [
-            (ChangeVerdict.REAL_CHANGE, "Yeni bir yapı ya da nesne eklenmiş görünüyor.", 0.92),
-            (ChangeVerdict.REAL_CHANGE, "Bir nesne kaybolmuş ya da yer değiştirmiş.", 0.80),
-            (ChangeVerdict.UNCERTAIN, "Fark belirgin ama nedeni net değil; elle kontrol önerilir.", 0.55),
-            (ChangeVerdict.FALSE_ALARM, "Gölge veya parlaklık kaynaklı fark; gerçek değişiklik değil.", 0.86),
-        ]
-        for i, region in enumerate(detection.regions):
-            verdict, text, conf = texts[min(i, len(texts) - 1)] if i < 3 else texts[3]
-            region.verdict, region.description, region.llm_confidence = verdict, text, conf
-        return detection
-
-    def summarize(self, registration: RegistrationResult, detection: DetectionResult) -> str | None:
-        time.sleep(0.4)
-        return DEMO_SUMMARY
-
-
-def install_demo_pipeline(with_llm: bool = True) -> Pipeline:
+def install_demo_pipeline() -> Pipeline:
     """Sahte bileşenlerle bir `Pipeline` kurar ve varsayılan yapar."""
     config = AppConfig()
-    config.runtime.release_cv_models_before_llm = False   # sahte bileşenlerde VRAM boşaltmaya (torch içe aktarmaya) gerek yok
-    pipeline = Pipeline(
-        DemoPreprocessor(), DemoRegistrar(), DemoDetector(),
-        analyst_factory=(lambda: DemoAnalyst()) if with_llm else None, config=config,
-    )
+    config.runtime.release_cv_models_after_run = False   # sahte bileşenlerde VRAM boşaltmaya (torch içe aktarmaya) gerek yok
+    pipeline = Pipeline(DemoPreprocessor(), DemoRegistrar(), DemoDetector(), config=config)
     set_default_pipeline(pipeline)
     return pipeline
 

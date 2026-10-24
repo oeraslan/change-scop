@@ -1,12 +1,12 @@
 """Uygulamanın tüm ayarları tek yerde.
 
-Model yolları, eşikler, tile boyutu, cihaz seçimi ve LLM ayarları burada tanımlanır. Modüller bu
+Model yolları, eşikler, tile boyutu ve cihaz seçimi burada tanımlanır. Modüller bu
 dosyayı SADECE OKUR; değişiklik ana oturuma aittir.
 
 Kullanım:
     from core.config import load_config
     cfg = load_config()                 # varsayılanlar + kullanıcı config.json üzerine yazılır
-    cfg.llm.model_spec.gguf_path(cfg.paths.models_dir)
+    cfg.paths.lightglue_weights
 
 Kullanıcı ayarları `%LOCALAPPDATA%/ChangeScope/config.json` içinde, sadece varsayılandan farklı
 alanlar yazılarak saklanır (bkz. `save_config`). Bilinmeyen anahtarlar yok sayılır.
@@ -34,11 +34,12 @@ APP_NAME = "ChangeScope"
 def app_root() -> Path:
     """Uygulama kök klasörünü döndürür.
 
-    PyInstaller onedir paketinde exe'nin bulunduğu klasör, geliştirmede proje kökü.
-    `models/` ve `bin/` bu klasörün altındadır.
+    Tek dosya (onefile) PyInstaller paketinde exe'nin açıldığı geçici klasör (`sys._MEIPASS`; `models/`
+    pakete gömülüdür), geliştirmede proje kökü. `models/` bu klasörün altındadır.
     """
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        bundle = getattr(sys, "_MEIPASS", None)
+        return Path(bundle) if bundle else Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent
 
 
@@ -53,8 +54,7 @@ def user_data_dir() -> Path:
 def _env_path(var: str, default: Path) -> Path:
     """Ortam değişkeni tanımlıysa onun yolunu, değilse `default`'u döndürür.
 
-    Geliştirmede git worktree'leri `models/` ve `bin/` içermez; ajanlar ana klasörü
-    `CHANGESCOPE_MODELS_DIR` / `CHANGESCOPE_BIN_DIR` ile gösterir.
+    Geliştirmede git worktree'leri `models/` içermez; ajanlar ana klasörü `CHANGESCOPE_MODELS_DIR` ile gösterir.
     """
     value = os.environ.get(var)
     return Path(value) if value else default
@@ -70,13 +70,7 @@ class PathsConfig:
     """Dosya sistemi konumları. Varsayılanlar `app_root()` ve `user_data_dir()` altındadır."""
 
     models_dir: Path = field(default_factory=lambda: _env_path("CHANGESCOPE_MODELS_DIR", app_root() / "models"))
-    bin_dir: Path = field(default_factory=lambda: _env_path("CHANGESCOPE_BIN_DIR", app_root() / "bin"))
     library_dir: Path = field(default_factory=lambda: user_data_dir() / "library")
-
-    @property
-    def llama_server_exe(self) -> Path:
-        """Gömülü llama-server.exe yolu."""
-        return self.bin_dir / "llama" / "llama-server.exe"
 
     @property
     def superpoint_weights(self) -> Path:
@@ -108,8 +102,8 @@ class RuntimeConfig:
     """Donanım seçimi. RTX 2060 (6 GB) hedeflenir; CUDA yoksa her şey CPU'da çalışır."""
 
     device: DeviceName = "auto"
-    # CV adımlarından sonra, LLM'den önce CV modellerini VRAM'den boşalt (6 GB'ta zorunlu).
-    release_cv_models_before_llm: bool = True
+    # Karşılaştırma bitince CV modellerini bellekten (VRAM'den) bırak.
+    release_cv_models_after_run: bool = True
 
 
 def resolve_device(preference: DeviceName = "auto") -> str:
@@ -186,85 +180,6 @@ class DetectionConfig:
 
 
 # ---------------------------------------------------------------------------
-# LLM (Gemma 4 + llama-server)
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class LLMModelSpec:
-    """İndirilebilir bir GGUF modelinin tanımı. `scripts/download_models.py` de bunu kullanır."""
-
-    key: str
-    display_name: str
-    hf_repo: str
-    gguf_file: str
-    mmproj_file: str
-    n_layers: int                           # -ngl "auto" hesabı için
-    approx_vram_mb: int                     # Tam offload için kaba tahmin (gguf + mmproj)
-
-    def model_dir(self, models_dir: Path) -> Path:
-        return models_dir / "gemma" / self.key
-
-    def gguf_path(self, models_dir: Path) -> Path:
-        return self.model_dir(models_dir) / self.gguf_file
-
-    def mmproj_path(self, models_dir: Path) -> Path:
-        return self.model_dir(models_dir) / self.mmproj_file
-
-
-LLM_MODELS: dict[str, LLMModelSpec] = {
-    "gemma-4-12b": LLMModelSpec(
-        key="gemma-4-12b",
-        display_name="Gemma 4 12B",
-        hf_repo="google/gemma-4-12B-it-qat-q4_0-gguf",
-        gguf_file="gemma-4-12b-it-qat-q4_0.gguf",
-        mmproj_file="mmproj-gemma-4-12b-it-qat-q4_0.gguf",
-        n_layers=48,
-        approx_vram_mb=7150,
-    ),
-    "gemma-4-e4b": LLMModelSpec(
-        key="gemma-4-e4b",
-        display_name="Gemma 4 E4B",
-        hf_repo="google/gemma-4-E4B-it-qat-q4_0-gguf",
-        gguf_file="gemma-4-E4B_q4_0-it.gguf",
-        mmproj_file="gemma-4-E4B-it-mmproj.gguf",
-        n_layers=42,
-        approx_vram_mb=6150,
-    ),
-}
-
-DEFAULT_LLM_MODEL = "gemma-4-12b"
-
-
-@dataclass
-class LLMConfig:
-    enabled: bool = True
-    model: str = DEFAULT_LLM_MODEL          # LLM_MODELS anahtarı
-    # "auto": başlatma anındaki boş VRAM'e göre hesaplanır; tam sayı: elle (-ngl), 0 = tamamen CPU.
-    n_gpu_layers: int | Literal["auto"] = "auto"
-    vram_safety_margin_mb: int = 600        # "auto" hesabında boş VRAM'den düşülen pay
-    mmproj_offload: bool = True             # False → --no-mmproj-offload (görü kodlayıcı CPU'da)
-    ctx_size: int = 8192
-    threads: int | None = None              # None → llama-server varsayılanı
-    temperature: float = 0.1
-    max_tokens: int = 400
-    max_regions: int = 20                   # Sadece en yüksek skorlu N bölge yorumlanır
-    crop_margin: float = 0.30
-    crop_max_side_px: int = 512
-    startup_timeout_s: float = 180.0        # Kısmi offload ile yükleme uzun sürebilir
-    request_timeout_s: float = 120.0
-    extra_server_args: list[str] = field(default_factory=list)
-
-    @property
-    def model_spec(self) -> LLMModelSpec:
-        """Seçili modelin tanımı; bilinmeyen anahtar → varsayılan model."""
-        spec = LLM_MODELS.get(self.model)
-        if spec is None:
-            log.warning("Bilinmeyen LLM modeli %r; %s kullanılacak.", self.model, DEFAULT_LLM_MODEL)
-            return LLM_MODELS[DEFAULT_LLM_MODEL]
-        return spec
-
-
-# ---------------------------------------------------------------------------
 # Kök
 # ---------------------------------------------------------------------------
 
@@ -275,7 +190,6 @@ class AppConfig:
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     registration: RegistrationConfig = field(default_factory=RegistrationConfig)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
-    llm: LLMConfig = field(default_factory=LLMConfig)
 
     def to_dict(self) -> dict[str, Any]:
         """JSON'a yazılabilir sözlük (Path → str)."""

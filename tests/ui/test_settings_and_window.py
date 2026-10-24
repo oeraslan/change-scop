@@ -13,16 +13,9 @@ from core.config import load_config
 
 def test_status_bar_texts(window) -> None:
     bar = window.status_bar
-    assert bar.llm_label.text().startswith("Gemma: kapalı")        # worktree'de model/exe yok
+    assert not hasattr(bar, "llm_label")                          # yapay zekâ durumu yok
     assert "9" not in bar.library_label.text() and "4 görüntü" in bar.library_label.text()
     assert bar.device_label.text() == "CPU"
-
-
-def test_status_bar_llm_states(window) -> None:
-    window.status_bar.set_llm_state("loading")
-    assert window.status_bar.llm_label.text() == "Gemma: yükleniyor…"
-    window.status_bar.set_llm_state("ready")
-    assert window.status_bar.llm_label.text() == "Gemma: hazır"
 
 
 def test_navigation_between_pages(window) -> None:
@@ -46,13 +39,12 @@ def test_settings_persist_to_config_file(window, tmp_path: Path) -> None:
     assert reloaded.detection.sensitivity == 0.8 and reloaded.registration.tile_size_px == 1536
 
 
-def test_llm_toggle_updates_status_and_compare_view(window, tmp_path: Path) -> None:
+def test_settings_have_no_ai_section(window) -> None:
     sv = window.settings_view
-    sv.llm_switch.setChecked(False)
-    assert window.config.llm.enabled is False
-    assert window.compare_view.use_llm is False
-    assert window.status_bar.llm_label.text().startswith("Gemma: kapalı")
-    assert json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))["llm"]["enabled"] is False
+    for name in ("llm_switch", "llm_model_combo", "max_regions_slider", "gpu_mode_combo"):
+        assert not hasattr(sv, name)
+    titles = " ".join(c.titleLabel.text() for c in sv.findChildren(type(sv.method_card)))
+    assert "Yapay zekâ" not in titles and "Gemma" not in titles
 
 
 def test_theme_switch_and_persistence(window, tmp_path: Path) -> None:

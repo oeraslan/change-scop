@@ -1,6 +1,6 @@
 """Görsel dil: renkler, yazı tipi, tema uygulama ve paylaşılan küçük bileşenler.
 
-Tek vurgu rengi camgöbeği (#22D3EE); durum renkleri verdict'lere bağlıdır. 8 px grid, 8 px köşe yarıçapı.
+Tek vurgu rengi camgöbeği (#22D3EE); değişiklik kutuları gül kırmızısı (#F43F5E). 8 px grid, 8 px köşe yarıçapı.
 """
 
 from __future__ import annotations
@@ -37,29 +37,16 @@ from qfluentwidgets import (
     setThemeColor,
 )
 
-from core.contracts import AlignmentQuality, ChangeVerdict, ImageSource
+from core.contracts import AlignmentQuality, ImageSource
 
 ACCENT = "#22D3EE"
 RADIUS = 8
 GRID = 8
 
 COLOR_REAL = "#F43F5E"
-COLOR_FALSE = "#94A3B8"
 COLOR_UNCERTAIN = "#F59E0B"
-COLOR_UNREVIEWED = "#60A5FA"
-
-VERDICT_COLORS: dict[ChangeVerdict, str] = {
-    ChangeVerdict.REAL_CHANGE: COLOR_REAL,
-    ChangeVerdict.FALSE_ALARM: COLOR_FALSE,
-    ChangeVerdict.UNCERTAIN: COLOR_UNCERTAIN,
-    ChangeVerdict.UNREVIEWED: COLOR_UNREVIEWED,
-}
-VERDICT_LABELS: dict[ChangeVerdict, str] = {
-    ChangeVerdict.REAL_CHANGE: "Gerçek değişiklik",
-    ChangeVerdict.FALSE_ALARM: "Yanlış alarm",
-    ChangeVerdict.UNCERTAIN: "Belirsiz",
-    ChangeVerdict.UNREVIEWED: "İncelenmedi",
-}
+COLOR_GOOD = "#34D399"
+REGION_COLOR = COLOR_REAL              # değişiklik kutuları
 SOURCE_LABELS: dict[str, str] = {
     ImageSource.DRONE.value: "Drone",
     ImageSource.UAV.value: "İHA",
@@ -72,16 +59,20 @@ QUALITY_LABELS: dict[str, str] = {
     AlignmentQuality.FAILED.value: "Hizalama başarısız",
 }
 QUALITY_COLORS: dict[str, str] = {
-    AlignmentQuality.GOOD.value: "#34D399",
+    AlignmentQuality.GOOD.value: COLOR_GOOD,
     AlignmentQuality.WEAK.value: COLOR_UNCERTAIN,
     AlignmentQuality.FAILED.value: COLOR_REAL,
 }
 FONT_FAMILIES = ["Segoe UI Variable", "Segoe UI", "Inter", "Arial"]
 
 
-def verdict_color(verdict: ChangeVerdict) -> QColor:
-    """Verdict'in durum rengi."""
-    return QColor(VERDICT_COLORS[verdict])
+def match_color(percent: float) -> str:
+    """Hizalama eşleşme yüzdesinin rengi: yüksek yeşil, orta turuncu, düşük kırmızı."""
+    if percent >= 60:
+        return COLOR_GOOD
+    if percent >= 30:
+        return COLOR_UNCERTAIN
+    return COLOR_REAL
 
 
 def _alpha(color: str | QColor, alpha: int) -> QColor:
@@ -173,7 +164,7 @@ class Surface(QFrame):
 
 
 class Pill(QWidget):
-    """Küçük renkli rozet (verdict, kaynak etiketi, sayaç)."""
+    """Küçük renkli rozet (kaynak etiketi, sayaç, kalite)."""
 
     def __init__(self, text: str = "", color: str | QColor = ACCENT, parent: QWidget | None = None) -> None:
         super().__init__(parent)

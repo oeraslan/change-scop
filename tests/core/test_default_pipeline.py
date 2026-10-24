@@ -19,11 +19,11 @@ def test_default_pipeline_finds_added_objects(tmp_path):
 
     pipe = build_default_pipeline(AppConfig())   # kullanıcının config.json'u testi etkilemesin
     stages: list[str] = []
-    result = pipe.run(ImageInput(before), ImageInput(after), lambda s, f, m="": stages.append(s),  # LLM: tests/llm
-                      use_llm=False)
+    result = pipe.run(ImageInput(before), ImageInput(after), lambda s, f, m="": stages.append(s))
 
     assert result.registration.quality is AlignmentQuality.GOOD
-    assert result.detection is not None and result.llm_used is False
+    assert result.registration.match_percent >= 35       # iyi hizalamada inlier oranı yüksek
+    assert result.detection is not None
     regions = result.detection.regions
     assert 1 <= len(regions) <= 4
     for x, y, w, h in pair.added_bboxes:

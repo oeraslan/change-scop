@@ -32,9 +32,9 @@ def _capturing_pipeline():
     seen: list[np.ndarray | None] = []
     real = pipe.run
 
-    def run(before, after, progress=None, use_llm=False, cancel=None, ignore_mask=None, on_cv_result=None):
+    def run(before, after, progress=None, cancel=None, ignore_mask=None):
         seen.append(None if ignore_mask is None else np.array(ignore_mask))
-        return real(before, after, progress, use_llm, cancel, ignore_mask, on_cv_result)
+        return real(before, after, progress, cancel, ignore_mask)
 
     pipe.run = run  # type: ignore[method-assign]
     return pipe, seen
@@ -346,7 +346,7 @@ def test_mask_mode_overlay_visible_even_when_diffs_hidden(window, populated, qtb
 # =========================================================== geçmiş sekmesi
 
 def _fill_history(library, recs):
-    res = make_result(recs[0].width, recs[0].height, with_llm=True)
+    res = make_result(recs[0].width, recs[0].height)
     a = library.save_comparison(recs[0], recs[1], res)
     b = library.save_comparison(recs[2], recs[3], res)
     library.repo.add_comparison(recs[3].folder_id, recs[3].id, recs[2].id, "results/none", "weak", 9, "liman",

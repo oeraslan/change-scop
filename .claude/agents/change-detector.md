@@ -39,7 +39,7 @@ Sen değişiklik tespiti (change detection) uzmanı bir bilgisayarlı görü mü
 ## Donanım / VRAM kuralları (RTX 2060, 6 GB)
 - Cihaz `core/config.py`'deki ayardan gelir (`"auto"` → CUDA varsa `cuda`, yoksa `cpu`).
   **CUDA yoksa her şey CPU'da çalışmalı.**
-- DINOv2 modeli llama-server ile aynı anda VRAM'de olmamalı. Detector, modeli serbest bırakmak için
+- Detector, DINOv2 modelini serbest bırakmak için
   bir `release()` metodu sağlasın (modeli `del` et, `gc.collect()`, CUDA varsa `torch.cuda.empty_cache()`).
   Pipeline CV adımları bitince bunu çağırır. Model ilk ihtiyaçta (lazy) yüklensin.
 - Çıkarımda `torch.inference_mode()` (+ CUDA'da fp16 autocast) kullan; büyük görüntüler tile'larla

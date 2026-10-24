@@ -1,4 +1,4 @@
-"""Karşılaştırma ekranı: yan yana senkron görüntüler, anahtarlar, ilerleme, InfoBar'lar, AI paneli."""
+"""Karşılaştırma ekranı: yan yana senkron görüntüler, anahtarlar, ilerleme, InfoBar'lar, sonuç paneli."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
-    CheckBox,
     InfoBar,
     InfoBarPosition,
     ProgressBar,
@@ -32,14 +31,14 @@ from qfluentwidgets import (
 from qfluentwidgets import FluentIcon as FIF
 
 from app.storage import ComparisonRecord, ImageRecord, Library
-from app.ui.ai_panel import AiPanel
 from app.ui.exporter import export_comparison
 from app.ui.mask_editor import TOOL_BRUSH, MaskEditor, MaskToolbar
 from app.ui.qt_utils import heatmap_to_qimage, invalid_area_to_qimage, rgb_to_qimage
+from app.ui.result_panel import ResultPanel
 from app.ui.sync_graphics_view import RegionSpec, SyncGraphicsView, SyncGroup
-from app.ui.theme import ACCENT, EmptyState, Pill, Surface
+from app.ui.theme import ACCENT, EmptyState, Pill, Surface, match_color
 from app.ui.workers import ComparisonWorker, MaskWorker, load_preview  # noqa: F401 - load_preview geriye uyumluluk
-from core.contracts import AlignmentQuality, ChangeVerdict, ComparisonResult
+from core.contracts import AlignmentQuality, ComparisonResult
 
 _RETIRED: set[ComparisonWorker] = set()   # iptal edilmiş ama henüz bitmemiş worker'lar (referans tutulur)
 
@@ -73,29 +72,24 @@ class _Pane(Surface):
 
 
 class CompareView(QWidget):
-    """En önemli ekran: iki görüntü yan yana, fark kutuları, AI yorumu."""
+    """En önemli ekran: iki görüntü yan yana, fark kutuları, eşleşme oranı ve bölge kartları."""
 
     backRequested = Signal()
     resultSaved = Signal(int)       # kaydedilen karşılaştırma id'si (geçmiş listesini yenilemek için)
     maskSaved = Signal(object)      # kaydedilen maskeli ImageRecord
-    llmActivity = Signal(bool)    # LLM asamasi basladi (True) / bitti-iptal-hata (False): durum cubugu icin
     workersIdle = Signal()        # hiçbir arka plan işi kalmadı (ertelenen ayar değişiklikleri için)
 
     def __init__(self, library: Library | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("compareView")
         self.library = library
-        self.use_llm = False
         self._before_rec: ImageRecord | None = None
         self._after_rec: ImageRecord | None = None
         self._comparison: ComparisonRecord | None = None
         self._result: ComparisonResult | None = None
         self._worker: ComparisonWorker | None = None
-        self._deferred_start: tuple | None = None   # (use_llm, loading_ai, force, interpret_result)
+        self._deferred_start: tuple | None = None   # (force,)
         self._infobars: list[InfoBar] = []
-        self._model_name = "Gemma 4 12B"
-        self._partial_shown = False       # CV sonucu gosterildi, AI yorumu bekleniyor
-        self._llm_active = False
         self._sized = False
         self._mask_workers: set[MaskWorker] = set()
         self._mask_saving = False
@@ -115,6 +109,9 @@ class CompareView(QWidget):
         self.title_label = SubtitleLabel("Karşılaştırma", self)
         self.dates_label = BodyLabel("", self)
         self.dates_label.setTextColor("#6b7280", "#9aa3b2")
+        self.match_pill = Pill("", ACCENT, self)
+        self.match_pill.setToolTip("Hizalama eşleşmesi: bulunan ortak noktaların ne kadarının tutarlı olduğu")
+        self.match_pill.setVisible(False)
 
         self.diff_switch = SwitchButton(self)
         self.diff_switch.setOnText("Farkları göster")
@@ -126,9 +123,6 @@ class CompareView(QWidget):
         self.heat_switch.setOnText("Isı haritası")
         self.heat_switch.setOffText("Isı haritası")
         self.heat_switch.checkedChanged.connect(self._on_heat_toggled)
-
-        self.hide_false_check = CheckBox("Yanlış alarmları gizle", self)
-        self.hide_false_check.toggled.connect(self._on_hide_false_toggled)
 
         self.mask_button = PushButton(FIF.BRUSH, "Yok sayma maskesi", self)
         self.mask_button.setToolTip("Karşılaştırmaya katılmayacak alanları boya (bulut, su, park alanı…)")
@@ -154,6 +148,7 @@ class CompareView(QWidget):
         titles.addWidget(self.title_label)
         titles.addWidget(self.dates_label)
         head.addLayout(titles)
+        head.addWidget(self.match_pill)
         head.addWidget(self.mask_badge)
         head.addStretch(1)
         head.addWidget(self.mask_button)
@@ -161,8 +156,6 @@ class CompareView(QWidget):
         head.addWidget(self.diff_switch)
         head.addSpacing(8)
         head.addWidget(self.heat_switch)
-        head.addSpacing(8)
-        head.addWidget(self.hide_false_check)
         head.addSpacing(8)
         head.addWidget(self.fit_button)
         head.addWidget(self.export_button)
@@ -194,7 +187,7 @@ class CompareView(QWidget):
         self.infobar_layout.setContentsMargins(0, 0, 0, 0)
         self.infobar_layout.setSpacing(8)
 
-        # --- Görüntüler + AI paneli ---
+        # --- Görüntüler + sonuç paneli ---
         self.image_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.image_splitter.setChildrenCollapsible(False)
         self.image_splitter.setHandleWidth(10)
@@ -221,15 +214,13 @@ class CompareView(QWidget):
             sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             sc.activated.connect(slot)
 
-        self.ai_panel = AiPanel(self)
-        self.ai_panel.set_model_name(self._model_name)
-        self.ai_panel.regionActivated.connect(self._on_card_clicked)
-        self.ai_panel.interpretRequested.connect(self.interpret)
+        self.result_panel = ResultPanel(self)
+        self.result_panel.regionActivated.connect(self._on_card_clicked)
 
         self.main_splitter = QSplitter(Qt.Orientation.Vertical, self)
         self.main_splitter.setHandleWidth(10)
         self.main_splitter.addWidget(self.image_splitter)
-        self.main_splitter.addWidget(self.ai_panel)
+        self.main_splitter.addWidget(self.result_panel)
         self.main_splitter.setCollapsible(0, False)
         self.main_splitter.setCollapsible(1, True)
         self.main_splitter.setStretchFactor(0, 3)
@@ -271,26 +262,18 @@ class CompareView(QWidget):
         QTimer.singleShot(0, self.group.fit_all)
 
     def _init_sizes(self) -> None:
-        """İlk gösterimde AI paneline makul bir yükseklik verir (sonra kullanıcı sürükler)."""
+        """İlk gösterimde sonuç paneline makul bir yükseklik verir (sonra kullanıcı sürükler)."""
         total = self.main_splitter.height()
         if total < 300:
             return
         self._sized = True
-        ai_h = max(280, min(340, total // 3))
-        self.main_splitter.setSizes([total - ai_h, ai_h])
+        panel_h = max(230, min(260, total // 3))
+        self.main_splitter.setSizes([total - panel_h, panel_h])
 
     def set_library(self, library: Library | None) -> None:
         """Kütüphane değiştiğinde (ayarlardan) çağrılır; eski kütüphaneyle çalışan iş bırakılır."""
         self._abort_worker()
         self.library = library
-
-    def set_model_name(self, name: str) -> None:
-        self._model_name = name
-        self.ai_panel.set_model_name(name)
-
-    def is_llm_active(self) -> bool:
-        """LLM aşaması (otomatik ya da "Yorumla") sürüyor mu?"""
-        return self._llm_active
 
     def is_busy(self) -> bool:
         """Bu ekranın aktif işi var mı (pipeline / kayıt / önbellek okuma)?"""
@@ -318,9 +301,7 @@ class CompareView(QWidget):
 
     # ------------------------------------------------------------- dışarıdan API
 
-    def open_pair(
-        self, before: ImageRecord, after: ImageRecord, force: bool = False, use_llm: bool | None = None
-    ) -> None:
+    def open_pair(self, before: ImageRecord, after: ImageRecord, force: bool = False) -> None:
         """İki görüntüyü karşılaştırma ekranında açar.
 
         Daha önce hesaplanmışsa kayıttan okur (yeniden hesaplamaz); değilse ilerleme çubuğuyla başlatır.
@@ -334,16 +315,16 @@ class CompareView(QWidget):
         self.mask_badge.setVisible(bool(before.mask_hash))
         self._comparison = None
         self._result = None
-        self._partial_shown = False
         self._set_header(before, after)
         self._clear_infobars()
-        self.ai_panel.show_off()
+        self.match_pill.setVisible(False)
+        self.result_panel.show_loading()
         self.export_button.setEnabled(False)
         for view in (self.before_view, self.after_view):
             view.set_regions([])
             view.set_heatmap(None)
         # Önbellek araması/okuması, önizleme yükleme, pipeline ve kayıt: hepsi worker thread'inde.
-        self._start_worker(self.use_llm if use_llm is None else use_llm, loading_ai=False, force=force)
+        self._start_worker(force=force)
 
     def open_comparison(self, rec: ComparisonRecord, force: bool = False) -> None:
         """Geçmişten kaydedilmiş karşılaştırmayı aç (`force=True`: önbelleği yok say, yeniden hesapla)."""
@@ -358,12 +339,11 @@ class CompareView(QWidget):
 
     def show_result(
         self, result: ComparisonResult, title: str | None = None, dates: str | None = None,
-        interpreting: bool = False, keep_view: bool = False,
+        keep_view: bool = False,
     ) -> None:
         """Hazır bir sonucu gösterir (kayıttan açma, demo ve testler için de kullanılır).
 
-        `interpreting=True`: kutular/kartlar hemen çizilir, AI paneli yükleniyor durumunda kalır.
-        `keep_view=True`: aynı görüntüler yeniden yorumlanıyor; zoom/pan korunur.
+        `keep_view=True`: aynı görüntüler yeniden gösteriliyor; zoom/pan korunur.
         """
         self._result = result
         self._outer.setCurrentWidget(self.body)
@@ -375,12 +355,20 @@ class CompareView(QWidget):
         self.before_view.set_image(rgb_to_qimage(reg.before.pixels), keep_view=keep_view)
         self.after_view.set_image(rgb_to_qimage(reg.after_warped), keep_view=keep_view)
         failed = reg.quality is AlignmentQuality.FAILED or result.detection is None
+        if reg.num_matches > 0:
+            pct = reg.match_percent
+            self.match_pill.set(f"Eşleşme %{round(pct)}", match_color(pct))
+            self.match_pill.setVisible(True)
+        else:
+            self.match_pill.set("Eşleşme yok", match_color(0))
+            self.match_pill.setVisible(True)
 
         self._clear_infobars()
         if reg.quality is AlignmentQuality.WEAK:
             note = (" " + reg.notes[0]) if reg.notes else ""
             self._info("warning", "Hizalama zayıf",
-                       f"{reg.num_inliers}/{reg.num_matches} eşleşme kullanıldı; sonuçlar dikkatle yorumlanmalı.{note}",
+                       f"Eşleşme %{round(reg.match_percent)} ({reg.num_inliers}/{reg.num_matches} nokta); "
+                       f"sonuçlar dikkatle yorumlanmalı.{note}",
                        key="weak")
         elif failed:
             self._info("error", "Hizalama başarısız",
@@ -417,11 +405,8 @@ class CompareView(QWidget):
         self._leave_mask_mode()
         self.diff_switch.setEnabled(not failed)
         self.heat_switch.setEnabled(not failed)
-        self.hide_false_check.setEnabled(not failed)
         self._apply_toggles(animate=False)
-        self.ai_panel.set_hide_false_alarms(self.hide_false_check.isChecked())
-        interpreting = interpreting and not failed and bool(result.detection.regions)  # type: ignore[union-attr]
-        self.ai_panel.set_result(result, interpreting=interpreting)
+        self.result_panel.set_result(result)
         self.export_button.setEnabled(True)
         self.group.highlight(None)
         if not keep_view:
@@ -430,10 +415,7 @@ class CompareView(QWidget):
     @staticmethod
     def _spec(region) -> RegionSpec:
         b = region.bbox
-        return RegionSpec(
-            region.region_id, QRectF(b.x, b.y, b.width, b.height), region.verdict, region.score,
-            region.description,
-        )
+        return RegionSpec(region.region_id, QRectF(b.x, b.y, b.width, b.height), region.score, region.area_px)
 
     # --------------------------------------------------------------- başlık/önizleme
 
@@ -456,7 +438,8 @@ class CompareView(QWidget):
             self._info("warning", "Güvenilirlik uyarısı",
                        f"Sonuç güvenilmez olabilir: {reason}", key="unreliable")
         fallback = params.get("fallback_reason")
-        if fallback:
+        # CPU'da varsayılan yöntemde DINOv2'nin kapatılması bilinçli bir hız tercihidir; uyarı değildir.
+        if fallback and not str(fallback).startswith("CPU:"):
             self._info("info", "Fark yöntemi değiştirildi",
                        f"İstenen yöntem kullanılamadı ({detection.method or 'ssim'} ile devam edildi): {fallback}",
                        key="fallback")
@@ -570,42 +553,21 @@ class CompareView(QWidget):
 
     # ---------------------------------------------------------------- işlem
 
-    def _start_worker(
-        self, use_llm: bool, loading_ai: bool, force: bool = True,
-        interpret_result: ComparisonResult | None = None,
-    ) -> None:
+    def _start_worker(self, force: bool = True) -> None:
         assert self._before_rec and self._after_rec and self.library
         self._set_progress_visible(True)
         self.progress_bar.setValue(0)
         self.export_button.setEnabled(False)
-        if loading_ai:
-            det = interpret_result.detection if interpret_result is not None else None
-            if det is not None and det.regions:
-                self.ai_panel.set_result(interpret_result, interpreting=True)    # kartlar kalır
-                self._partial_shown = True
-            else:
-                self.ai_panel.show_loading()
-            self._set_llm_active(True)
         if any(w.isRunning() for w in _RETIRED):
             # Önceki (iptal edilmiş) iş modelleri bırakana kadar bekle; çakışma olmasın.
-            self._deferred_start = (use_llm, loading_ai, force, interpret_result)
+            self._deferred_start = (force,)
             self.stage_label.setText("Önceki işlem durduruluyor…")
             return
-        self._launch(use_llm, loading_ai, force, interpret_result)
+        self._launch(force)
 
-    def _set_llm_active(self, active: bool) -> None:
-        if active != self._llm_active:
-            self._llm_active = active
-            self.llmActivity.emit(active)
-
-    def _launch(self, use_llm: bool, loading_ai: bool, force: bool,
-                interpret_result: ComparisonResult | None = None) -> None:
+    def _launch(self, force: bool) -> None:
         assert self._before_rec and self._after_rec and self.library
-        worker = ComparisonWorker(
-            self.library, self._before_rec, self._after_rec, use_llm, force=force,
-            load_previews=not loading_ai, interpret_result=interpret_result,
-        )
-        worker.partial.connect(self._on_partial)
+        worker = ComparisonWorker(self.library, self._before_rec, self._after_rec, force=force)
         worker.previews.connect(self._on_previews)
         worker.progress.connect(self._on_progress)
         worker.succeeded.connect(self._on_success)
@@ -615,18 +577,6 @@ class CompareView(QWidget):
         self._worker = worker
         self.stage_label.setText("Başlatılıyor…")
         worker.start()
-
-    def interpret(self) -> None:
-        """"Yorumla": AI yorumunu (LLM açık) sonradan çalıştırır."""
-        if self._before_rec is None or self._after_rec is None or self.is_busy() or self._result is None:
-            return
-        if not self.ai_panel.interpret_enabled():
-            return
-        det = self._result.detection
-        if det is None or not det.regions:
-            return          # yorumlanacak bölge yok
-        self._clear_infobars(keep=("weak", "failed", "overlap", "unreliable", "fallback"))
-        self._start_worker(True, loading_ai=True, interpret_result=self._result)
 
     def cancel(self) -> None:
         """Çalışan karşılaştırmayı iptal eder; UI beklemeden "İptal edildi" durumuna geçer."""
@@ -639,7 +589,7 @@ class CompareView(QWidget):
         self._deferred_start = None
         worker, self._worker = self._worker, None
         if worker is not None:
-            for sig in ("partial", "previews", "progress", "succeeded", "cancelled", "failed"):
+            for sig in ("previews", "progress", "succeeded", "cancelled", "failed"):
                 try:
                     getattr(worker, sig).disconnect()
                 except (TypeError, RuntimeError):
@@ -650,7 +600,6 @@ class CompareView(QWidget):
             else:
                 worker.deleteLater()
         self._set_progress_visible(False)
-        self._set_llm_active(False)
 
     def _set_progress_visible(self, visible: bool) -> None:
         self.progress_host.setVisible(visible)
@@ -665,25 +614,12 @@ class CompareView(QWidget):
     def _on_progress(self, stage: str, fraction: float, message: str) -> None:
         self.progress_bar.setValue(int(max(0.0, min(1.0, fraction)) * 1000))
         self.stage_label.setText(message or stage)
-        if stage.startswith("llm"):
-            self._set_llm_active(True)
-            if self.ai_panel.state() != "loading":
-                self.ai_panel.show_loading(message)
-            else:
-                self.ai_panel.set_stage_text(message)
-
-    def _on_partial(self, result: ComparisonResult) -> None:
-        """CV sonucu hazır: kutular/kartlar hemen çizilir, AI paneli yüklenir."""
-        self._partial_shown = True
-        self.show_result(result, interpreting=True)
+        self.result_panel.set_stage_text(message)
 
     def _on_success(self, result: ComparisonResult, record, cached: bool, save_error: str) -> None:
         self._set_progress_visible(False)
-        self._set_llm_active(False)
         self._comparison = record
-        keep = self._partial_shown or (
-            self._result is not None and self._result.registration is result.registration)
-        self._partial_shown = False
+        keep = self._result is not None and self._result.registration is result.registration
         self.show_result(result, keep_view=keep)
         if save_error:
             self._info("warning", "Sonuç kaydedilemedi", save_error)
@@ -692,24 +628,20 @@ class CompareView(QWidget):
 
     def _on_cancelled(self) -> None:
         self._set_progress_visible(False)
-        self._set_llm_active(False)
-        self._partial_shown = False
         self._info("info", "İptal edildi", "Karşılaştırma iptal edildi.", duration=4000)
         if self._result is not None:
-            self.ai_panel.set_result(self._result)
+            self.result_panel.set_result(self._result)
             self.export_button.setEnabled(True)
         else:
-            self.ai_panel.show_off()
+            self.result_panel.show_idle()
 
     def _on_failed(self, message: str) -> None:
         self._set_progress_visible(False)
-        self._set_llm_active(False)
-        self._partial_shown = False
         self._info("error", "Karşılaştırma başarısız", message, key="error")
         if self._result is not None:
-            self.ai_panel.set_result(self._result)
+            self.result_panel.set_result(self._result)
         else:
-            self.ai_panel.show_off()
+            self.result_panel.show_idle()
 
     def _on_worker_finished(self) -> None:
         worker = self.sender()
@@ -730,8 +662,6 @@ class CompareView(QWidget):
         for view in (self.before_view, self.after_view):
             view.set_regions_visible(self.diff_switch.isChecked(), animate)
             view.set_heatmap_visible(self.heat_switch.isChecked(), animate)
-            view.set_hidden_verdicts(
-                {ChangeVerdict.FALSE_ALARM} if self.hide_false_check.isChecked() else set())
 
     def _on_diffs_toggled(self, on: bool) -> None:
         for view in (self.before_view, self.after_view):
@@ -741,20 +671,15 @@ class CompareView(QWidget):
         for view in (self.before_view, self.after_view):
             view.set_heatmap_visible(on, animate=True)
 
-    def _on_hide_false_toggled(self, on: bool) -> None:
-        for view in (self.before_view, self.after_view):
-            view.set_hidden_verdicts({ChangeVerdict.FALSE_ALARM} if on else set())
-        self.ai_panel.set_hide_false_alarms(on)
-
     # ---------------------------------------------------------- bölge etkileşimi
 
     def _on_region_clicked_in_view(self, region_id: int) -> None:
         self.group.highlight(region_id)
-        self.ai_panel.highlight(region_id)
+        self.result_panel.highlight(region_id)
 
     def _on_card_clicked(self, region_id: int) -> None:
         self.group.highlight(region_id)
-        self.ai_panel.highlight(region_id)
+        self.result_panel.highlight(region_id)
         item = self.before_view._region_items.get(region_id)
         if item is not None:
             self.group.zoom_to_region(item.spec.rect)
@@ -810,8 +735,7 @@ class CompareView(QWidget):
         """Mevcut sonucu (anahtar durumlarına göre kutulu/kutusuz) dışa aktarır."""
         assert self._result is not None
         written = export_comparison(
-            self._result, png_path, show_boxes=self.diff_switch.isChecked(),
-            hide_false_alarms=self.hide_false_check.isChecked(), title=self.title_label.text(),
+            self._result, png_path, show_boxes=self.diff_switch.isChecked(), title=self.title_label.text(),
         )
         self._info("success", "Dışa aktarıldı", ", ".join(p.name for p in written), duration=5000)
         return written

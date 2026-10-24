@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from core.config import (
-    DEFAULT_LLM_MODEL,
-    LLM_MODELS,
     AppConfig,
     app_root,
     load_config,
@@ -18,28 +17,18 @@ from core.config import (
 
 def test_defaults_point_inside_project(monkeypatch):
     monkeypatch.delenv("CHANGESCOPE_MODELS_DIR", raising=False)
-    monkeypatch.delenv("CHANGESCOPE_BIN_DIR", raising=False)
     cfg = AppConfig()
     assert cfg.paths.models_dir == app_root() / "models"
-    assert cfg.paths.llama_server_exe == app_root() / "bin" / "llama" / "llama-server.exe"
     assert cfg.registration.tile_size_px == 1024
     assert cfg.registration.tile_overlap == 0.10
-    assert cfg.llm.model == DEFAULT_LLM_MODEL == "gemma-4-12b"
-    assert cfg.llm.n_gpu_layers == "auto"
+    assert not hasattr(cfg, "llm")
 
 
-def test_both_llm_models_defined():
-    assert set(LLM_MODELS) == {"gemma-4-12b", "gemma-4-e4b"}
-    for spec in LLM_MODELS.values():
-        assert spec.gguf_file.endswith(".gguf") and spec.mmproj_file.endswith(".gguf")
-        assert spec.n_layers > 0
-        assert spec.gguf_path(Path("m")).parent == Path("m") / "gemma" / spec.key
-
-
-def test_unknown_model_falls_back_to_default():
-    cfg = AppConfig()
-    cfg.llm.model = "yok-boyle-model"
-    assert cfg.llm.model_spec.key == DEFAULT_LLM_MODEL
+def test_app_root_in_onefile_bundle_is_meipass(monkeypatch, tmp_path):
+    """Tek dosya exe'de models/ pakete gömülüdür: kök, exe'nin açıldığı geçici klasördür."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    assert app_root() == tmp_path
 
 
 def test_missing_or_corrupt_file_gives_defaults(tmp_path):
@@ -52,15 +41,14 @@ def test_missing_or_corrupt_file_gives_defaults(tmp_path):
 def test_save_writes_only_overrides_and_roundtrips(tmp_path):
     path = tmp_path / "config.json"
     cfg = AppConfig()
-    cfg.llm.model = "gemma-4-e4b"
-    cfg.llm.n_gpu_layers = 20
     cfg.detection.min_region_area_px = 900
+    cfg.runtime.device = "cpu"
     cfg.paths.library_dir = tmp_path / "lib"
     save_config(cfg, path)
 
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["llm"] == {"model": "gemma-4-e4b", "n_gpu_layers": 20}
     assert data["detection"] == {"min_region_area_px": 900}
+    assert data["runtime"] == {"device": "cpu"}
     assert "registration" not in data
 
     loaded = load_config(path)
@@ -69,11 +57,13 @@ def test_save_writes_only_overrides_and_roundtrips(tmp_path):
 
 
 def test_unknown_keys_ignored(tmp_path):
+    """Eski sürümün LLM ayarları (ve bilinmeyen bölümler) yok sayılır; uygulama açılmaya devam eder."""
     path = tmp_path / "config.json"
-    path.write_text(json.dumps({"llm": {"model": "gemma-4-e4b", "garip": 1}, "eski_bolum": {}}),
-                    encoding="utf-8")
+    path.write_text(json.dumps({"llm": {"model": "gemma-4-e4b"}, "detection": {"sensitivity": 0.7, "garip": 1},
+                                "eski_bolum": {}}), encoding="utf-8")
     cfg = load_config(path)
-    assert cfg.llm.model == "gemma-4-e4b"
+    assert cfg.detection.sensitivity == 0.7
+    assert not hasattr(cfg, "llm")
 
 
 def test_resolve_device(monkeypatch):
@@ -87,9 +77,7 @@ def test_resolve_device(monkeypatch):
     assert resolve_device("auto") == "cuda"
 
 
-def test_env_overrides_model_and_bin_dirs(monkeypatch, tmp_path):
+def test_env_overrides_models_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("CHANGESCOPE_MODELS_DIR", str(tmp_path / "m"))
-    monkeypatch.setenv("CHANGESCOPE_BIN_DIR", str(tmp_path / "b"))
     cfg = AppConfig()
     assert cfg.paths.models_dir == tmp_path / "m"
-    assert cfg.paths.llama_server_exe == tmp_path / "b" / "llama" / "llama-server.exe"

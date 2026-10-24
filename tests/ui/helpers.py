@@ -13,7 +13,6 @@ from core.contracts import (
     AlignmentQuality,
     BoundingBox,
     ChangeRegion,
-    ChangeVerdict,
     ComparisonResult,
     DetectionResult,
     ImageInput,
@@ -21,12 +20,6 @@ from core.contracts import (
     RegistrationResult,
 )
 from core.pipeline import Pipeline
-
-SUMMARY = (
-    "Kuzeydoğuda yeni bir yapı inşa edilmiş, yol kenarındaki iki araç artık yok. "
-    "Batıdaki farklar gölge kaynaklıdır."
-)
-
 
 def scene(width: int, height: int, seed: int = 1, shift: int = 0) -> np.ndarray:
     """Basit, tanınabilir bir RGB sahne (gradyan + bloklar)."""
@@ -43,29 +36,26 @@ def scene(width: int, height: int, seed: int = 1, shift: int = 0) -> np.ndarray:
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
-def make_regions(width: int, height: int, with_llm: bool) -> list[ChangeRegion]:
-    """3 bölge: yeni yapı (gerçek), kayıp araç (gerçek), gölge (yanlış alarm)."""
+def make_regions(width: int, height: int) -> list[ChangeRegion]:
+    """3 bölge: yeni yapı, kayıp araç, gölge (farklı skorlarla)."""
     specs = [
-        (0.62, 0.12, 0.18, 0.2, 0.91, ChangeVerdict.REAL_CHANGE, "Yeni bir yapı inşa edilmiş.", 0.93),
-        (0.30, 0.62, 0.10, 0.1, 0.74, ChangeVerdict.REAL_CHANGE, "Yol kenarındaki araç kaybolmuş.", 0.81),
-        (0.08, 0.35, 0.16, 0.18, 0.42, ChangeVerdict.FALSE_ALARM, "Gölge kaynaklı fark (yanlış alarm).", 0.88),
+        (0.62, 0.12, 0.18, 0.2, 0.91),
+        (0.30, 0.62, 0.10, 0.1, 0.74),
+        (0.08, 0.35, 0.16, 0.18, 0.42),
     ]
     regions = []
-    for i, (fx, fy, fw, fh, score, verdict, desc, conf) in enumerate(specs, start=1):
+    for i, (fx, fy, fw, fh, score) in enumerate(specs, start=1):
         w, h = max(8, int(width * fw)), max(8, int(height * fh))
         x, y = int(width * fx), int(height * fy)
-        region = ChangeRegion(
+        regions.append(ChangeRegion(
             region_id=i, bbox=BoundingBox(x, y, w, h), mask=np.ones((h, w), dtype=bool),
             score=score, area_px=w * h,
-        )
-        if with_llm:
-            region.verdict, region.description, region.llm_confidence = verdict, desc, conf
-        regions.append(region)
+        ))
     return regions
 
 
 def make_result(
-    width: int = 320, height: int = 240, with_llm: bool = False,
+    width: int = 320, height: int = 240,
     quality: AlignmentQuality = AlignmentQuality.GOOD, original=None,
 ) -> ComparisonResult:
     """Sahte `ComparisonResult` (FAILED ise detection=None)."""
@@ -83,15 +73,14 @@ def make_result(
     detection = None
     if quality is not AlignmentQuality.FAILED:
         cmap = np.zeros((height, width), dtype=np.float32)
-        regions = make_regions(width, height, with_llm)
+        regions = make_regions(width, height)
         for r in regions:
             b = r.bbox
             cmap[b.y:b.y + b.height, b.x:b.x + b.width] = r.score
         detection = DetectionResult(change_map=cmap, regions=regions, method="ssim",
                                   params={"method_requested": "ssim+dinov2"})
     return ComparisonResult(
-        registration=registration, detection=detection, llm_used=with_llm, elapsed_s=0.1,
-        summary=SUMMARY if with_llm else None,
+        registration=registration, detection=detection, elapsed_s=0.1,
     )
 
 
@@ -125,7 +114,7 @@ class InstantRegistrar:
 class InstantDetector:
     def detect(self, registration: RegistrationResult) -> DetectionResult:
         h, w = registration.before.pixels.shape[:2]
-        regions = make_regions(w, h, with_llm=False)
+        regions = make_regions(w, h)
         cmap = np.zeros((h, w), dtype=np.float32)
         for r in regions:
             cmap[r.bbox.y:r.bbox.y + r.bbox.height, r.bbox.x:r.bbox.x + r.bbox.width] = r.score
@@ -133,31 +122,11 @@ class InstantDetector:
                                   params={"method_requested": "ssim+dinov2"})
 
 
-class InstantAnalyst:
-    def is_available(self) -> bool:
-        return True
-
-    def analyze(self, registration, detection):
-        h, w = registration.before.pixels.shape[:2]
-        for mine, theirs in zip(make_regions(w, h, True), detection.regions):
-            theirs.verdict, theirs.description = mine.verdict, mine.description
-            theirs.llm_confidence = mine.llm_confidence
-        return detection
-
-    def summarize(self, registration, detection) -> str | None:
-        return SUMMARY
-
-
-def make_pipeline(
-    quality: AlignmentQuality = AlignmentQuality.GOOD, delay: float = 0.0, with_llm: bool = True
-) -> Pipeline:
+def make_pipeline(quality: AlignmentQuality = AlignmentQuality.GOOD, delay: float = 0.0) -> Pipeline:
     """Sahte bileşenlerle `Pipeline` (config: varsayılan, diskten okumaz)."""
     config = AppConfig()
-    config.runtime.release_cv_models_before_llm = False   # torch içe aktarma maliyetinden kaçın
-    return Pipeline(
-        InstantPreprocessor(), InstantRegistrar(quality, delay), InstantDetector(),
-        analyst_factory=(lambda: InstantAnalyst()) if with_llm else None, config=config,
-    )
+    config.runtime.release_cv_models_after_run = False   # torch içe aktarma maliyetinden kaçın
+    return Pipeline(InstantPreprocessor(), InstantRegistrar(quality, delay), InstantDetector(), config=config)
 
 
 class BlockingRegistrar(InstantRegistrar):

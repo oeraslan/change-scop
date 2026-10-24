@@ -122,9 +122,7 @@ class HistoryRow(Surface):
         self.folder_text = " / ".join(f.name for f in chain) or "Karşılaştırma"
         info.addWidget(StrongBodyLabel(self.folder_text))
         dates = f"{format_date(before.captured_at if before else None)}  →  {format_date(after.captured_at if after else None)}"
-        stamp = rec.summary or ""
-        cap = dim_label(stamp[:90] + ("…" if len(stamp) > 90 else "") if stamp else
-                        f"Hesaplandı: {format_date(rec.created_at)}")
+        cap = dim_label(f"Hesaplandı: {format_date(rec.created_at)}")
         cap.setMinimumWidth(0)
         self.pills: list[Pill] = []
         if rec.mask_hash:
@@ -515,7 +513,7 @@ class LibraryView(QWidget):
     def confirm_delete_comparison(self, rec: ComparisonRecord) -> None:
         box = MessageBox(
             "Karşılaştırma silinsin mi?",
-            "Kayıtlı sonuç (fark haritası, bölgeler, yapay zekâ yorumu) kalıcı olarak silinir. "
+            "Kayıtlı sonuç (fark haritası, bölgeler) kalıcı olarak silinir. "
             "Görüntülere dokunulmaz; tekrar karşılaştırabilirsin.", self.window())
         box.yesButton.setText("Sil")
         box.cancelButton.setText("Vazgeç")

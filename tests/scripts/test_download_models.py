@@ -121,30 +121,12 @@ def test_safe_extract_strip_and_include(tmp_path):
     assert not (tmp_path / "out" / "notebooks").exists()
 
 
-def _asset(name: str) -> dict:
-    return {"name": name, "size": 1, "browser_download_url": f"https://x/{name}"}
-
-
-def test_pick_llama_release_skips_non_build_tags():
-    releases = [
-        {"tag_name": "v0.7.0", "assets": [_asset("llama-v0.7.0-bin-win-cuda-12.4-x64.zip")]},
-        {"tag_name": "b200", "assets": [_asset("llama-b200-bin-win-cpu-x64.zip")]},
-        {"tag_name": "b199", "assets": [_asset("llama-b199-bin-win-cuda-12.4-x64.zip"),
-                                       _asset("cudart-llama-bin-win-cuda-12.4-x64.zip"),
-                                       _asset("llama-b199-bin-win-cuda-13.4-x64.zip")]},
-    ]
-    tag, main, rt = dm.pick_llama_release(releases, "12.4")
-    assert tag == "b199"
-    assert main["name"] == "llama-b199-bin-win-cuda-12.4-x64.zip"
-    assert rt["name"] == "cudart-llama-bin-win-cuda-12.4-x64.zip"
-    with pytest.raises(dm.DownloadError):
-        dm.pick_llama_release(releases, "12.4", tag="b200")
-
-
 def test_parse_targets():
-    assert dm.parse_targets(None, False) == dm.DEFAULT_TARGETS
-    assert "gemma-e4b" not in dm.DEFAULT_TARGETS
+    assert dm.parse_targets(None, False) == dm.DEFAULT_TARGETS == ["superpoint", "lightglue", "dinov2"]
     assert dm.parse_targets(None, True) == dm.ALL_TARGETS
-    assert dm.parse_targets(["llama,superpoint", "gemma"], False) == ["superpoint", "gemma-12b", "llama"]
+    assert dm.parse_targets(["dinov2,superpoint"], False) == ["superpoint", "dinov2"]
+    for removed in ("gemma", "gemma-12b", "llama"):
+        with pytest.raises(SystemExit):
+            dm.parse_targets([removed], False)
     with pytest.raises(SystemExit):
         dm.parse_targets(["yok"], False)

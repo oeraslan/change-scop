@@ -11,10 +11,7 @@ lightglue @ git+https://github.com/cvg/LightGlue.git
 # UI
 PySide6>=6.7
 PySide6-Fluent-Widgets>=1.6
-# LLM istemcisi (llama-server ile localhost konuşur)
-httpx>=0.27
 # Geliştirme / test / paketleme
 pytest>=8.3
 pytest-qt>=4.4
 pyinstaller>=6.10
-huggingface_hub>=0.25

@@ -21,7 +21,6 @@ from core.contracts import (
     AlignmentQuality,
     BoundingBox,
     ChangeRegion,
-    ChangeVerdict,
     ComparisonResult,
     DetectionResult,
     ImageInput,
@@ -240,7 +239,7 @@ class Library:
     ) -> ComparisonRecord:
         """Karşılaştırma sonucunu `results/<id>/` altına yazar ve kaydı ekler/günceller.
 
-        change_map, bölgeler (maskeleriyle), AI yorumları, hizalanmış görüntü ve özet saklanır.
+        change_map, bölgeler (maskeleriyle) ve hizalanmış görüntü saklanır.
         Kayıt tek transaction içinde eklenir/güncellenir (eşzamanlı kayıtlar çift satır üretmez).
 
         Args:
@@ -261,7 +260,7 @@ class Library:
                 _write_result(self.abs_path(new_dir), result)
                 rec, old_dir = self.repo.replace_comparison(
                     before.folder_id, before.id, after.id, new_dir, quality, n_regions,
-                    result.summary, mask_hash, method,
+                    None, mask_hash, method,
                 )
             except Exception:
                 shutil.rmtree(self.abs_path(new_dir), ignore_errors=True)
@@ -370,9 +369,6 @@ def _write_result(directory: Path, result: ComparisonResult) -> None:
                 "bbox": [r.bbox.x, r.bbox.y, r.bbox.width, r.bbox.height],
                 "score": float(r.score),
                 "area_px": int(r.area_px),
-                "verdict": r.verdict.value,
-                "description": r.description,
-                "llm_confidence": r.llm_confidence,
             })
     np.savez_compressed(directory / "arrays.npz", **arrays)
     meta = {
@@ -388,9 +384,7 @@ def _write_result(directory: Path, result: ComparisonResult) -> None:
         "method": det.method if det else None,
         "params": det.params if det else {},
         "regions": regions_meta,
-        "llm_used": result.llm_used,
         "elapsed_s": result.elapsed_s,
-        "summary": result.summary,
     }
     tmp = directory / f"meta.{uuid.uuid4().hex[:8]}.tmp"
     tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -425,16 +419,14 @@ def _read_result(directory: Path, before_in: ImageInput, after_in: ImageInput | 
             regions.append(ChangeRegion(
                 region_id=r["region_id"], bbox=BoundingBox(x, y, w, h),
                 mask=masks.get(f"mask_{r['region_id']}", np.ones((h, w), dtype=bool)),
-                score=r["score"], area_px=r["area_px"], verdict=ChangeVerdict(r["verdict"]),
-                description=r.get("description"), llm_confidence=r.get("llm_confidence"),
+                score=r["score"], area_px=r["area_px"],
             ))
         detection = DetectionResult(
             change_map=change_map, regions=regions, method=meta.get("method") or "",
             params=meta.get("params", {}),
         )
     return ComparisonResult(
-        registration=registration, detection=detection, llm_used=bool(meta["llm_used"]),
-        elapsed_s=float(meta["elapsed_s"]), summary=meta.get("summary"),
+        registration=registration, detection=detection, elapsed_s=float(meta["elapsed_s"]),
     )
 
 

@@ -14,7 +14,6 @@ from core.contracts import (
     AlignmentQuality,
     BoundingBox,
     ChangeRegion,
-    ChangeVerdict,
     ComparisonResult,
     DetectionResult,
     ImageSource,
@@ -157,16 +156,16 @@ def test_save_and_load_comparison_roundtrip(lib: Library, tmp_path: Path) -> Non
     f = lib.repo.create_folder("X")
     before = lib.import_image(_png(tmp_path / "b.png"), f.id, datetime(2026, 10, 12))
     after = lib.import_image(_png(tmp_path / "a.png"), f.id, datetime(2026, 10, 19))
-    result = make_result(before.width, before.height, with_llm=True)
+    result = make_result(before.width, before.height)
     assert lib.find_comparison(before, after) is None
 
     rec = lib.save_comparison(before, after, result)
-    assert rec.region_count == 3 and rec.quality == "good" and rec.summary == result.summary
+    assert rec.region_count == 3 and rec.quality == "good" and rec.summary is None
 
     found = lib.find_comparison(before, after)
     assert found is not None and found.id == rec.id
     loaded = lib.load_comparison(found)
-    assert loaded.summary == result.summary and loaded.llm_used
+    assert loaded.registration.match_percent == result.registration.match_percent
     assert loaded.registration.quality is AlignmentQuality.GOOD
     np.testing.assert_array_equal(loaded.registration.after_warped, result.registration.after_warped)
     np.testing.assert_array_equal(loaded.registration.before.pixels, result.registration.before.pixels)
@@ -174,8 +173,7 @@ def test_save_and_load_comparison_roundtrip(lib: Library, tmp_path: Path) -> Non
     np.testing.assert_allclose(loaded.detection.change_map, result.detection.change_map, atol=1e-3)
     assert [r.region_id for r in loaded.detection.regions] == [1, 2, 3]
     r0, o0 = loaded.detection.regions[0], result.detection.regions[0]
-    assert r0.bbox == o0.bbox and r0.verdict is ChangeVerdict.REAL_CHANGE
-    assert r0.description == o0.description and r0.llm_confidence == o0.llm_confidence
+    assert r0.bbox == o0.bbox and r0.score == o0.score and r0.area_px == o0.area_px
     np.testing.assert_array_equal(r0.mask, o0.mask)
 
     # Aynı çift tekrar kaydedilince yeni kayıt açılmaz, güncellenir.
@@ -205,6 +203,25 @@ def test_empty_regions_result(lib: Library, tmp_path: Path) -> None:
     assert lib.load_comparison(rec).detection.regions == []
 
 
-def test_region_dataclass_defaults() -> None:
+def test_region_dataclass_has_no_llm_fields() -> None:
     r = ChangeRegion(1, BoundingBox(0, 0, 2, 2), np.ones((2, 2), bool), 0.5, 4)
-    assert r.verdict is ChangeVerdict.UNREVIEWED
+    for name in ("verdict", "description", "llm_confidence"):
+        assert not hasattr(r, name)
+
+
+def test_old_result_with_ai_fields_still_loads(lib: Library, tmp_path: Path) -> None:
+    """Önceki sürümün (yapay zekâ yorumlu) kayıtları yeni sürümde açılabilmeli."""
+    import json
+
+    f = lib.repo.create_folder("X")
+    before = lib.import_image(_png(tmp_path / "b.png"), f.id)
+    after = lib.import_image(_png(tmp_path / "a.png"), f.id)
+    rec = lib.save_comparison(before, after, make_result(before.width, before.height))
+    meta_path = lib.abs_path(rec.result_dir) / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.update({"llm_used": True, "summary": "eski özet"})
+    for r in meta["regions"]:
+        r.update({"verdict": "false_alarm", "description": "gölge", "llm_confidence": 0.9})
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    loaded = lib.load_comparison(rec)
+    assert len(loaded.detection.regions) == 3

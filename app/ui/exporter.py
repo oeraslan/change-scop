@@ -7,8 +7,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from app.ui.theme import VERDICT_COLORS, VERDICT_LABELS
-from core.contracts import ChangeVerdict, ComparisonResult
+from app.ui.theme import REGION_COLOR
+from core.contracts import ComparisonResult
 
 
 def _font(size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
@@ -21,7 +21,7 @@ def _font(size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
 
 
 def render_side_by_side(
-    result: ComparisonResult, show_boxes: bool = True, hide_false_alarms: bool = False, gap: int = 16
+    result: ComparisonResult, show_boxes: bool = True, gap: int = 16
 ) -> Image.Image:
     """Önce | Sonra (hizalanmış) yan yana görüntüsü; `show_boxes` ise kutular ve numaralar çizilir."""
     reg = result.registration
@@ -30,14 +30,12 @@ def render_side_by_side(
         h, w = reg.before.pixels.shape[:2]
         line = max(2, round(max(h, w) / 500))
         font = _font(max(14, round(max(h, w) / 55)))
+        color = REGION_COLOR.lstrip("#")
+        rgb = tuple(int(color[i:i + 2], 16) for i in (0, 2, 4))
         for pane in panes:
             overlay = Image.new("RGBA", pane.size, (0, 0, 0, 0))
             draw = ImageDraw.Draw(overlay)
             for r in result.detection.regions:
-                if hide_false_alarms and r.verdict is ChangeVerdict.FALSE_ALARM:
-                    continue
-                color = VERDICT_COLORS[r.verdict].lstrip("#")
-                rgb = tuple(int(color[i:i + 2], 16) for i in (0, 2, 4))
                 b = r.bbox
                 box = (b.x, b.y, b.x + b.width, b.y + b.height)
                 draw.rectangle(box, fill=rgb + (52,), outline=rgb + (255,), width=line)
@@ -56,35 +54,31 @@ def render_side_by_side(
 
 
 def export_comparison(
-    result: ComparisonResult, png_path: Path, show_boxes: bool = True, hide_false_alarms: bool = False,
-    title: str = "",
+    result: ComparisonResult, png_path: Path, show_boxes: bool = True, title: str = "",
 ) -> list[Path]:
     """PNG + `<ad>_bolgeler.csv` + `<ad>_ozet.txt` dosyalarını yazar ve yollarını döndürür."""
     png_path = Path(png_path)
     png_path.parent.mkdir(parents=True, exist_ok=True)
-    render_side_by_side(result, show_boxes, hide_false_alarms).save(png_path, "PNG")
+    render_side_by_side(result, show_boxes).save(png_path, "PNG")
 
     csv_path = png_path.with_name(png_path.stem + "_bolgeler.csv")
     regions = result.detection.regions if result.detection else []
     with csv_path.open("w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.writer(fh, delimiter=";")
-        writer.writerow(["No", "X", "Y", "Genişlik", "Yükseklik", "Alan_px", "Skor", "Karar",
-                         "Güven", "Açıklama"])
+        writer.writerow(["No", "X", "Y", "Genişlik", "Yükseklik", "Alan_px", "Skor"])
         for r in regions:
             writer.writerow([
-                r.region_id, r.bbox.x, r.bbox.y, r.bbox.width, r.bbox.height, r.area_px,
-                f"{r.score:.3f}", VERDICT_LABELS[r.verdict],
-                "" if r.llm_confidence is None else f"{r.llm_confidence:.2f}", r.description or "",
+                r.region_id, r.bbox.x, r.bbox.y, r.bbox.width, r.bbox.height, r.area_px, f"{r.score:.3f}",
             ])
 
     txt_path = png_path.with_name(png_path.stem + "_ozet.txt")
+    reg = result.registration
     lines = [title or "ChangeScope karşılaştırma özeti", "=" * 40,
-             f"Hizalama: {result.registration.quality.value} "
-             f"({result.registration.num_inliers}/{result.registration.num_matches} eşleşme)",
+             f"Hizalama eşleşmesi: %{reg.match_percent:.0f} "
+             f"({reg.num_inliers}/{reg.num_matches} eşleşme, kalite: {reg.quality.value})",
              f"Bölge sayısı: {len(regions)}", ""]
-    lines.append(result.summary or "Yapay zekâ özeti yok.")
     for r in regions:
-        lines.append(f"  #{r.region_id} [{VERDICT_LABELS[r.verdict]}] {r.description or ''}".rstrip())
+        lines.append(f"  #{r.region_id}  skor {r.score:.2f}  alan {r.area_px} px")
     txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return [png_path, csv_path, txt_path]
 

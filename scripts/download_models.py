@@ -1,4 +1,4 @@
-"""Geliştirme sırasında model ağırlıklarını ve llama-server'ı indirir.
+"""Geliştirme sırasında model ağırlıklarını indirir.
 
 UYARI: Bu script SADECE geliştirme/kurulum içindir. Uygulama çalışma zamanında asla ağa çıkmaz.
 
@@ -6,20 +6,14 @@ Hedefler:
     superpoint   models/superpoint/superpoint_v1.pth                (cvg/LightGlue release)
     lightglue    models/lightglue/superpoint_lightglue.pth          (cvg/LightGlue release)
     dinov2       models/dinov2/dinov2_vits14_pretrain.pth + dinov2_src/ (Meta, sabit commit)
-    gemma-12b    models/gemma/gemma-4-12b/  resmi QAT Q4_0 GGUF + mmproj (~7.1 GB)
-    gemma-e4b    models/gemma/gemma-4-e4b/  resmi QAT Q4_0 GGUF + mmproj (~6.1 GB)
-    llama        bin/llama/  llama.cpp'nin en yeni Windows CUDA build'i + CUDA runtime DLL'leri
 
 Örnekler:
-    .venv\\Scripts\\python.exe scripts/download_models.py                 # varsayılan set (e4b hariç)
-    .venv\\Scripts\\python.exe scripts/download_models.py --only gemma-e4b
+    .venv\\Scripts\\python.exe scripts/download_models.py                 # hepsi
     .venv\\Scripts\\python.exe scripts/download_models.py --only superpoint,lightglue --force
-    .venv\\Scripts\\python.exe scripts/download_models.py --all
     .venv\\Scripts\\python.exe scripts/download_models.py --list
 
 İndirmeler `<dosya>.part` olarak yazılır; yarıda kesilirse (Ctrl+C, ağ hatası) script tekrar
-çalıştırıldığında HTTP Range ile kaldığı yerden devam eder. Hugging Face dosyaları SHA-256 ile
-doğrulanır, diğerleri boyutla.
+çalıştırıldığında HTTP Range ile kaldığı yerden devam eder. Dosyalar boyutla doğrulanır.
 """
 
 from __future__ import annotations
@@ -34,14 +28,9 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from core.config import LLM_MODELS, LLMModelSpec  # noqa: E402
 
 try:
     from tqdm import tqdm
@@ -49,7 +38,6 @@ except ImportError:  # pragma: no cover - tqdm requirements ile gelir
     tqdm = None
 
 MODELS_DIR = PROJECT_ROOT / "models"
-LLAMA_DIR = PROJECT_ROOT / "bin" / "llama"
 
 USER_AGENT = "ChangeScope-model-downloader/1.0"
 CHUNK = 1024 * 1024
@@ -60,11 +48,9 @@ DINOV2_WEIGHTS_URL = "https://dl.fbaipublicfiles.com/dinov2/dinov2_vits14/dinov2
 # facebookresearch/dinov2 kaynak kodu sabit bir commit'ten (tekrarlanabilirlik)
 DINOV2_COMMIT = "7764ea0f912e53c92e82eb78a2a1631e92725fc8"
 DINOV2_SRC_URL = f"https://github.com/facebookresearch/dinov2/archive/{DINOV2_COMMIT}.zip"
-LLAMA_RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=30"
 
-GEMMA_TARGETS = {"gemma-12b": "gemma-4-12b", "gemma-e4b": "gemma-4-e4b"}
-ALL_TARGETS = ["superpoint", "lightglue", "dinov2", "gemma-12b", "gemma-e4b", "llama"]
-DEFAULT_TARGETS = ["superpoint", "lightglue", "dinov2", "gemma-12b", "llama"]
+ALL_TARGETS = ["superpoint", "lightglue", "dinov2"]
+DEFAULT_TARGETS = list(ALL_TARGETS)
 
 
 class DownloadError(RuntimeError):
@@ -312,99 +298,6 @@ def get_dinov2(force: bool) -> None:
     print(f"  ✓ dinov2 kaynak kodu açıldı ({n} dosya) → models/dinov2/dinov2_src/")
 
 
-def hf_file_info(repo: str, revision: str = "main") -> dict[str, tuple[int | None, str | None]]:
-    """Hugging Face deposundaki dosyaların {ad: (boyut, sha256)} bilgisini döndürür."""
-    data = fetch_json(f"https://huggingface.co/api/models/{repo}/revision/{revision}?blobs=true")
-    assert isinstance(data, dict)
-    info: dict[str, tuple[int | None, str | None]] = {}
-    for s in data.get("siblings", []):
-        lfs = s.get("lfs") or {}
-        info[s["rfilename"]] = (lfs.get("size", s.get("size")), lfs.get("sha256"))
-    return info
-
-
-def get_gemma(spec: LLMModelSpec, force: bool) -> None:
-    print(f"  {spec.display_name} ← huggingface.co/{spec.hf_repo}")
-    info = hf_file_info(spec.hf_repo)
-    files = [spec.gguf_file, spec.mmproj_file]
-    missing = [f for f in files if f not in info]
-    if missing:
-        raise DownloadError(f"{spec.hf_repo} içinde bulunamadı: {missing}. core/config.py'yi güncelleyin.")
-    needed = sum(info[f][0] or 0 for f in files if force or not spec.model_dir(MODELS_DIR).joinpath(f).is_file())
-    _check_disk(spec.model_dir(MODELS_DIR), needed)
-    for name in files:
-        size, sha = info[name]
-        download_file(
-            f"https://huggingface.co/{spec.hf_repo}/resolve/main/{name}",
-            spec.model_dir(MODELS_DIR) / name,
-            expected_size=size, expected_sha256=sha, force=force,
-        )
-
-
-def pick_llama_release(
-    releases: list[dict], cuda: str, tag: str | None = None
-) -> tuple[str, dict, dict | None]:
-    """Release listesinden uygun build'i seçer.
-
-    llama.cpp build'leri `bNNNN` etiketiyle "prerelease" olarak yayınlanır; bu yüzden
-    `/releases/latest` kullanılmaz. En yeni (veya `tag` ile verilen) build seçilir.
-
-    Returns:
-        (etiket, llama zip asset'i, cudart zip asset'i veya None)
-    """
-    want_bin = f"-bin-win-cuda-{cuda}-x64.zip"
-    want_rt = f"cudart-llama-bin-win-cuda-{cuda}-x64.zip"
-    for rel in releases:
-        name = rel.get("tag_name", "")
-        if tag and name != tag:
-            continue
-        if not tag and not (name.startswith("b") and name[1:].isdigit()):
-            continue
-        assets = rel.get("assets", [])
-        main = next((a for a in assets if a["name"].startswith("llama-") and a["name"].endswith(want_bin)), None)
-        if main is None:
-            continue
-        runtime = next((a for a in assets if a["name"] == want_rt), None)
-        return name, main, runtime
-    raise DownloadError(
-        f"CUDA {cuda} x64 Windows build'i bulunamadı" + (f" (etiket {tag})" if tag else "")
-    )
-
-
-def get_llama(force: bool, cuda: str, tag: str | None) -> None:
-    releases = fetch_json(LLAMA_RELEASES_API if not tag else
-                          f"https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{tag}")
-    releases = releases if isinstance(releases, list) else [releases]
-    tag_name, main, runtime = pick_llama_release(releases, cuda, tag)
-
-    version_file = LLAMA_DIR / "VERSION.txt"
-    wanted = f"{tag_name} cuda-{cuda}"
-    if not force and version_file.is_file() and version_file.read_text().strip() == wanted \
-            and (LLAMA_DIR / "llama-server.exe").is_file():
-        print(f"  ✓ zaten var: bin/llama ({wanted})")
-        return
-    print(f"  llama.cpp {tag_name} (CUDA {cuda})")
-
-    cache = LLAMA_DIR / "_downloads"
-    assets = [main] + ([runtime] if runtime else [])
-    _check_disk(LLAMA_DIR, sum(a["size"] for a in assets) * 2)
-    zips = [download_file(a["browser_download_url"], cache / a["name"], expected_size=a["size"], force=force)
-            for a in assets]
-
-    # Eski kurulumu temizle (.gitkeep ve indirme önbelleği hariç)
-    for child in LLAMA_DIR.iterdir():
-        if child.name in {".gitkeep", "_downloads"}:
-            continue
-        shutil.rmtree(child) if child.is_dir() else child.unlink()
-    for z in zips:
-        n = safe_extract(z, LLAMA_DIR, strip_prefix=common_root(z))
-        print(f"  ✓ açıldı: {z.name} ({n} dosya)")
-    if not (LLAMA_DIR / "llama-server.exe").is_file():
-        raise DownloadError("Arşivde llama-server.exe bulunamadı; bin/llama içeriğini kontrol edin.")
-    version_file.write_text(wanted + "\n")
-    shutil.rmtree(cache, ignore_errors=True)
-
-
 def _check_disk(path: Path, needed: int) -> None:
     path.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(path).free
@@ -428,14 +321,6 @@ def target_status(target: str) -> tuple[bool, str]:
         ok = (MODELS_DIR / "dinov2" / "dinov2_vits14_pretrain.pth").is_file() and \
              (MODELS_DIR / "dinov2" / "dinov2_src" / "dinov2").is_dir()
         return ok, "models/dinov2/"
-    if target in GEMMA_TARGETS:
-        spec = LLM_MODELS[GEMMA_TARGETS[target]]
-        ok = spec.gguf_path(MODELS_DIR).is_file() and spec.mmproj_path(MODELS_DIR).is_file()
-        return ok, f"models/gemma/{spec.key}/ ({spec.display_name}, ~{spec.approx_vram_mb / 1024:.1f} GB)"
-    if target == "llama":
-        v = LLAMA_DIR / "VERSION.txt"
-        ok = (LLAMA_DIR / "llama-server.exe").is_file()
-        return ok, f"bin/llama/ ({v.read_text().strip() if v.is_file() else '-'})"
     raise ValueError(target)
 
 
@@ -451,8 +336,6 @@ def parse_targets(only: list[str] | None, all_: bool) -> list[str]:
             t = t.strip().lower()
             if not t:
                 continue
-            if t == "gemma":
-                t = "gemma-12b"
             if t not in ALL_TARGETS:
                 raise SystemExit(f"Bilinmeyen hedef: {t!r}. Geçerli: {', '.join(ALL_TARGETS)}")
             chosen.add(t)
@@ -463,12 +346,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--only", action="append", metavar="HEDEF",
                         help=f"Sadece bu hedef(ler): {', '.join(ALL_TARGETS)} (virgülle veya tekrarla)")
-    parser.add_argument("--all", action="store_true", help="gemma-e4b dahil her şey")
+    parser.add_argument("--all", action="store_true", help="Tüm hedefler (varsayılanla aynı)")
     parser.add_argument("--force", action="store_true", help="Var olan dosyaları yeniden indir")
     parser.add_argument("--list", action="store_true", help="Sadece kurulum durumunu göster")
-    parser.add_argument("--llama-cuda", default="12.4", choices=["12.4", "13.4"],
-                        help="llama.cpp CUDA build'i (varsayılan 12.4)")
-    parser.add_argument("--llama-tag", default=None, help="Belirli bir llama.cpp build etiketi (ör. b11785)")
     args = parser.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):  # Çıktı boruya yönlenince cp125x'te ✓/↓ çökmesin
         if hasattr(stream, "reconfigure"):
@@ -492,10 +372,6 @@ def main(argv: list[str] | None = None) -> int:
                 get_lightglue(args.force)
             elif t == "dinov2":
                 get_dinov2(args.force)
-            elif t in GEMMA_TARGETS:
-                get_gemma(LLM_MODELS[GEMMA_TARGETS[t]], args.force)
-            elif t == "llama":
-                get_llama(args.force, args.llama_cuda, args.llama_tag)
         except KeyboardInterrupt:
             print("\nİptal edildi. Tekrar çalıştırınca yarım kalan dosyalar kaldığı yerden devam eder.")
             return 130

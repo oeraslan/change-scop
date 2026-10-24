@@ -71,6 +71,13 @@ class RegistrationResult:
     quality: AlignmentQuality
     notes: list[str] = field(default_factory=list)
 
+    @property
+    def match_percent(self) -> float:
+        """Hizalama eşleşmesi (%): homografiyle tutarlı (inlier) eşleşmelerin tüm eşleşmelere oranı, 0..100."""
+        if self.num_matches <= 0:
+            return 0.0
+        return 100.0 * min(self.num_inliers, self.num_matches) / self.num_matches
+
 
 # ---------------------------------------------------------------------------
 # Değişiklik tespiti (change-detector)
@@ -84,13 +91,6 @@ class BoundingBox:
     height: int
 
 
-class ChangeVerdict(str, Enum):
-    UNREVIEWED = "unreviewed"       # LLM henüz bakmadı ya da LLM kapalı
-    REAL_CHANGE = "real_change"
-    FALSE_ALARM = "false_alarm"     # gölge, ışık, sıkıştırma, hizalama hatası vb.
-    UNCERTAIN = "uncertain"
-
-
 @dataclass
 class ChangeRegion:
     """Tek bir aday değişiklik bölgesi."""
@@ -100,10 +100,6 @@ class ChangeRegion:
     mask: np.ndarray                    # bbox boyutunda bool maske
     score: float                        # 0..1, yüksek = daha güçlü değişiklik
     area_px: int
-    # llm-analyst tarafından doldurulur:
-    verdict: ChangeVerdict = ChangeVerdict.UNREVIEWED
-    description: str | None = None      # Türkçe kısa açıklama
-    llm_confidence: float | None = None
 
 
 @dataclass
@@ -130,22 +126,6 @@ class ChangeDetector(Protocol):
     def detect(self, registration: RegistrationResult) -> DetectionResult: ...
 
 
-class RegionAnalyst(Protocol):
-    def is_available(self) -> bool: ...
-
-    def analyze(
-        self, registration: RegistrationResult, detection: DetectionResult
-    ) -> DetectionResult:
-        """Bölgelerin verdict/description/llm_confidence alanlarını doldurup döndürür."""
-        ...
-
-    def summarize(
-        self, registration: RegistrationResult, detection: DetectionResult
-    ) -> str | None:
-        """Analiz edilmiş bölgelerden Türkçe, 2-4 cümlelik genel özet üretir. Başarısızsa None."""
-        ...
-
-
 # ---------------------------------------------------------------------------
 # İlerleme bildirimi (UI için)
 # ---------------------------------------------------------------------------
@@ -160,6 +140,4 @@ class ComparisonResult:
 
     registration: RegistrationResult
     detection: DetectionResult | None   # Hizalama FAILED ise None
-    llm_used: bool
     elapsed_s: float
-    summary: str | None = None          # Yapay zekâ genel özeti (LLM kapalıysa None)

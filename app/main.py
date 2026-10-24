@@ -9,6 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from app.prefs import load_prefs
@@ -17,6 +18,19 @@ from app.ui.main_window import MainWindow
 from app.ui.theme import apply_app_font, apply_theme
 from core import pipeline as core_pipeline
 from core.config import load_config
+
+ICON_PATH = Path(__file__).resolve().parent / "assets" / "changescope.ico"
+
+
+def _set_windows_app_id() -> None:
+    """Windows görev çubuğunun python.exe yerine uygulamanın kendi ikonunu göstermesi için."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ChangeScope.ChangeScope")
+        except (AttributeError, OSError):
+            pass
 
 
 def build_window(
@@ -52,8 +66,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
+    _set_windows_app_id()
     app = QApplication(sys.argv if argv is None else [sys.argv[0], *argv])
     app.setApplicationName("ChangeScope")
+    if ICON_PATH.is_file():
+        app.setWindowIcon(QIcon(str(ICON_PATH)))
     apply_app_font(app)
     library_dir = args.library_dir
     prefs_path = None
@@ -63,7 +80,20 @@ def main(argv: list[str] | None = None) -> int:
     window = build_window(library_dir, args.config or (library_dir.parent / "config.json" if args.demo and library_dir else None),
                           prefs_path, demo=args.demo)
     window.show()
+    _close_splash()
     return app.exec()
+
+
+def _close_splash() -> None:
+    """Tek dosya exe'nin açılış ekranını (PyInstaller splash) kapatır; geliştirmede hiçbir şey yapmaz."""
+    try:
+        import pyi_splash  # type: ignore[import-not-found]  # yalnızca paketlenmiş exe'de vardır
+    except ImportError:
+        return
+    try:
+        pyi_splash.close()
+    except RuntimeError:
+        pass
 
 
 if __name__ == "__main__":

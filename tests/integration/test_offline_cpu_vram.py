@@ -28,7 +28,7 @@ def _host_of(value) -> str | None:  # noqa: ANN001
 def _block_network(monkeypatch) -> list:
     """Dış ağa giden tüm soket bağlantı/DNS girişimlerini kaydedip reddeder; denemeleri döndürür.
 
-    Yerel llama-server (127.0.0.1) bağlantısı CLAUDE.md'deki izinli istisnadır; ona izin verilir.
+    Yerel (127.0.0.1) bağlantılar dış ağ sayılmaz; onlara izin verilir.
     """
     attempts: list = []
 
@@ -58,7 +58,7 @@ def test_full_pipeline_with_network_blocked(monkeypatch, tmp_path) -> None:
     before, after = write_pair(pair, tmp_path, "net")
     pipe = build_default_pipeline(AppConfig())
     try:
-        result = pipe.run(ImageInput(before), ImageInput(after), use_llm=True)
+        result = pipe.run(ImageInput(before), ImageInput(after))
     finally:
         pipe.shutdown()
     assert attempts == [], f"çalışma zamanında ağ denemesi: {attempts}"

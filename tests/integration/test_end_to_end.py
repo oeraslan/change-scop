@@ -108,7 +108,7 @@ def test_result_contract_invariants(real_pipeline, tmp_path_factory) -> None:
         full = np.zeros((h, w), bool)
         full[b.y:b.y + b.height, b.x:b.x + b.width] = r.mask
         assert not (full & ~reg.valid_mask).any(), "bölge örtüşmeyen alana taşıyor"
-    assert result.llm_used is False and result.summary is None
+    assert 0.0 <= reg.match_percent <= 100.0 and reg.match_percent == 100.0 * reg.num_inliers / reg.num_matches
 
 
 def test_homography_matches_truth(real_pipeline, tmp_path_factory) -> None:

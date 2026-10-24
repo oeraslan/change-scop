@@ -49,9 +49,22 @@ def _selftest(pair_dir: str) -> int:
     return 0 if result.registration.quality is not AlignmentQuality.FAILED and n > 0 else 1
 
 
+def _splash_text(text: str) -> None:
+    """Açılış ekranındaki durum metnini günceller (splash yoksa sessizce geçer)."""
+    try:
+        import pyi_splash  # type: ignore[import-not-found]
+
+        pyi_splash.update_text(text)
+    except (ImportError, RuntimeError):
+        pass
+
+
 if __name__ == "__main__":
     _redirect_std_streams()
     if len(sys.argv) == 3 and sys.argv[1] == "--selftest":
+        from app.main import _close_splash
+
+        _close_splash()
         try:
             sys.exit(_selftest(sys.argv[2]))
         except Exception:
@@ -59,6 +72,7 @@ if __name__ == "__main__":
 
             traceback.print_exc()
             sys.exit(2)
+    _splash_text("Arayüz yükleniyor…")
     from app.main import main
 
     sys.exit(main())

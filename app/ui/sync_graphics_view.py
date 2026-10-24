@@ -29,8 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.ui.mask_editor import BrushCursorItem, MaskEditor, MaskOverlayItem
-from app.ui.theme import VERDICT_COLORS, VERDICT_LABELS, palette
-from core.contracts import ChangeVerdict
+from app.ui.theme import REGION_COLOR, palette
 
 MAX_SCALE = 40.0
 ZOOM_STEP = 1.25
@@ -45,17 +44,15 @@ class RegionSpec:
 
     region_id: int
     rect: QRectF
-    verdict: ChangeVerdict = ChangeVerdict.UNREVIEWED
     score: float = 0.0
-    description: str | None = None
+    area_px: int = 0
 
     @property
     def tooltip(self) -> str:
-        """Hover açıklaması: numara, verdict, açıklama ve skor."""
-        lines = [f"#{self.region_id} · {VERDICT_LABELS[self.verdict]}"]
-        if self.description:
-            lines.append(self.description)
-        lines.append(f"Skor: {self.score:.2f}")
+        """Hover açıklaması: numara, skor ve alan."""
+        lines = [f"Bölge #{self.region_id}", f"Fark skoru: {self.score:.2f}"]
+        if self.area_px:
+            lines.append(f"Alan: {self.area_px:,} px".replace(",", "."))
         return "\n".join(lines)
 
 
@@ -88,7 +85,7 @@ class _Badge(QGraphicsItem):
 
 
 class RegionItem(QGraphicsRectItem):
-    """Yarı saydam dolgulu, net kenarlı bölge kutusu (verdict rengi)."""
+    """Yarı saydam dolgulu, net kenarlı bölge kutusu."""
 
     def __init__(self, spec: RegionSpec, group: "SyncGroup | None", parent: QGraphicsItem) -> None:
         super().__init__(spec.rect, parent)
@@ -96,7 +93,7 @@ class RegionItem(QGraphicsRectItem):
         self._group = group
         self._highlight = False
         self._hover = False
-        self._color = QColor(VERDICT_COLORS[spec.verdict])
+        self._color = QColor(REGION_COLOR)
         self.setAcceptHoverEvents(True)
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)  # sürükleyerek pan'i engellemesin
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -183,7 +180,6 @@ class SyncGraphicsView(QGraphicsView):
         self._invalid_item: QGraphicsPixmapItem | None = None
         self._region_items: dict[int, RegionItem] = {}
         self._regions_visible = True
-        self._hidden_verdicts: set[ChangeVerdict] = set()
         self._anims: dict[str, QPropertyAnimation] = {}
         self._zoom_anim: QVariantAnimation | None = None
         self._press_pos: QPointF | None = None
@@ -288,7 +284,6 @@ class SyncGraphicsView(QGraphicsView):
         self._region_items.clear()
         for spec in specs:
             self._region_items[spec.region_id] = RegionItem(spec, self._group, self._region_layer)
-        self._apply_verdict_filter()
         self._region_layer.setVisible(self._regions_visible and bool(specs))
 
     def set_invalid_overlay(self, image: QImage | None) -> None:
@@ -334,15 +329,6 @@ class SyncGraphicsView(QGraphicsView):
             self._region_layer.setVisible(False)
             return
         self._fade_item("regions", self._region_layer, 1.0 if visible else 0.0, animate)
-
-    def set_hidden_verdicts(self, verdicts: set[ChangeVerdict]) -> None:
-        """Belirtilen verdict'lere sahip kutuları gizler (ör. yanlış alarmlar)."""
-        self._hidden_verdicts = set(verdicts)
-        self._apply_verdict_filter()
-
-    def _apply_verdict_filter(self) -> None:
-        for item in self._region_items.values():
-            item.setVisible(item.spec.verdict not in self._hidden_verdicts)
 
     def set_highlight(self, region_id: int | None) -> None:
         for rid, item in self._region_items.items():

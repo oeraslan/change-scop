@@ -227,7 +227,7 @@ def test_history_tab_lists_saved_comparisons(window, populated) -> None:
     from tests.ui.helpers import make_result
 
     library, _, recs = populated
-    library.save_comparison(recs[0], recs[1], make_result(recs[0].width, recs[0].height, with_llm=True))
+    library.save_comparison(recs[0], recs[1], make_result(recs[0].width, recs[0].height))
     lv = window.library_view
     lv.refresh_history()
     lv.show_tab("history")

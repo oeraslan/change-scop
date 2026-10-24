@@ -44,8 +44,7 @@ Sen bilgisayarlı görü ve görüntü kaydı (image registration) uzmanı bir P
 ## Donanım / VRAM kuralları (RTX 2060, 6 GB)
 - Cihaz `core/config.py`'deki ayardan gelir (`"auto"` → CUDA varsa `cuda`, yoksa `cpu`).
   **CUDA yoksa her şey CPU'da çalışmalı**; CUDA'ya özgü hiçbir çağrı koşulsuz yapılmaz.
-- SuperPoint/LightGlue modelleri llama-server ile aynı anda VRAM'de olmamalı. Registrar, modelleri
-  serbest bırakmak için bir `release()` metodu sağlasın (modelleri `del` et, `gc.collect()`,
+- Registrar, SuperPoint/LightGlue modellerini serbest bırakmak için bir `release()` metodu sağlasın (modelleri `del` et, `gc.collect()`,
   CUDA varsa `torch.cuda.empty_cache()`). Pipeline CV adımları bitince bunu çağırır.
 - Çıkarımda `torch.inference_mode()` kullan; tile/ölçek seçimi 6 GB VRAM'i aşmayacak şekilde olsun.
   CUDA OOM yakalanırsa CPU'ya geri dön ve `notes`'a yaz.

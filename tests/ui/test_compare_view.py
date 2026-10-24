@@ -1,4 +1,4 @@
-"""Karşılaştırma ekranı: kutular, anahtarlar, senkron zoom, InfoBar'lar, işlem akışı, AI paneli."""
+"""Karşılaştırma ekranı: kutular, anahtarlar, senkron zoom, InfoBar'lar, işlem akışı, sonuç paneli."""
 
 from __future__ import annotations
 
@@ -10,15 +10,13 @@ from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QApplication
 
 from core import pipeline as core_pipeline
-from core.contracts import AlignmentQuality, ChangeVerdict
+from core.contracts import AlignmentQuality
 from core.pipeline import Pipeline, set_default_pipeline
 from tests.ui.helpers import (
     BlockingRegistrar,
-    InstantAnalyst,
     InstantDetector,
     InstantPreprocessor,
     InstantRegistrar,
-    SUMMARY,
     make_pipeline,
     make_result,
 )
@@ -26,10 +24,10 @@ from tests.ui.helpers import (
 
 @pytest.fixture()
 def cv(window):
-    """Sonuç yüklenmiş karşılaştırma görünümü (3 bölge, AI yorumlu)."""
+    """Sonuç yüklenmiş karşılaştırma görünümü (3 bölge, eşleşme %75)."""
     view = window.compare_view
     window.switchTo(view)
-    view.show_result(make_result(640, 480, with_llm=True), title="X Bölgesi / Y Dağı", dates="12.10.2026 → 19.10.2026")
+    view.show_result(make_result(640, 480), title="X Bölgesi / Y Dağı", dates="12.10.2026 → 19.10.2026")
     return view
 
 
@@ -46,11 +44,11 @@ def test_regions_drawn_on_both_views_by_default(cv, qtbot) -> None:
     assert left == right                                # aynı kutular aynı koordinatta
 
 
-def test_region_colors_follow_verdict(cv) -> None:
-    from app.ui.theme import VERDICT_COLORS
+def test_regions_use_single_change_color(cv) -> None:
+    from app.ui.theme import REGION_COLOR
 
     for item in cv.before_view.region_items():
-        assert item.pen().color().name().lower() == VERDICT_COLORS[item.spec.verdict].lower()
+        assert item.pen().color().name().lower() == REGION_COLOR.lower()
 
 
 def test_toggle_off_hides_all_markers(cv, qtbot) -> None:
@@ -67,7 +65,7 @@ def test_toggle_off_hides_all_markers(cv, qtbot) -> None:
 def test_toggle_off_survives_new_result(cv, qtbot) -> None:
     cv.diff_switch.setChecked(False)
     qtbot.waitUntil(lambda: cv.visible_region_count() == (0, 0))
-    cv.show_result(make_result(640, 480, with_llm=True))
+    cv.show_result(make_result(640, 480))
     assert cv.visible_region_count() == (0, 0)             # kapalı kalır
 
 
@@ -81,20 +79,10 @@ def test_heatmap_toggle_is_separate_and_default_off(cv, qtbot) -> None:
     qtbot.waitUntil(lambda: not cv.before_view.heatmap_visible())
 
 
-def test_hide_false_alarms(cv, qtbot) -> None:
-    qtbot.waitUntil(lambda: cv.visible_region_count() == (3, 3))
-    cv.hide_false_check.setChecked(True)
-    assert cv.visible_region_count() == (2, 2)
-    assert len(cv.ai_panel.visible_card_ids()) == 2
-    verdicts = {i.spec.verdict for i in cv.before_view.visible_region_items()}
-    assert ChangeVerdict.FALSE_ALARM not in verdicts
-    cv.hide_false_check.setChecked(False)
-    assert cv.visible_region_count() == (3, 3)
-
-
-def test_hover_tooltip_has_description_and_score(cv) -> None:
+def test_hover_tooltip_has_number_score_and_area(cv) -> None:
     item = cv.before_view.region_items()[0]
-    assert "Yeni bir yapı" in item.toolTip() and "Skor: 0.91" in item.toolTip()
+    tip = item.toolTip()
+    assert "Bölge #1" in tip and "Fark skoru: 0.91" in tip and "px" in tip
 
 
 # ---------------------------------------------------------------------- senkron zoom/pan
@@ -137,10 +125,10 @@ def test_double_click_fits(cv, qtbot) -> None:
 
 def test_card_click_zooms_to_region_and_highlights(cv, qtbot) -> None:
     fit = cv.before_view.zoom_factor()
-    cv.ai_panel.regionActivated.emit(1)
+    cv.result_panel.regionActivated.emit(1)
     qtbot.waitUntil(lambda: cv.before_view.zoom_factor() > fit * 1.5)
     assert cv.after_view.zoom_factor() == pytest.approx(cv.before_view.zoom_factor())
-    assert cv.ai_panel.selected_card_id() == 1
+    assert cv.result_panel.selected_card_id() == 1
     assert cv.before_view._region_items[1]._highlight
 
 
@@ -148,7 +136,7 @@ def test_region_click_in_view_highlights_card(cv, qtbot) -> None:
     item = cv.before_view._region_items[2]
     center = cv.before_view.mapFromScene(item.sceneBoundingRect().center())
     qtbot.mouseClick(cv.before_view.viewport(), Qt.MouseButton.LeftButton, pos=center)
-    assert cv.ai_panel.selected_card_id() == 2
+    assert cv.result_panel.selected_card_id() == 2
 
 
 # --------------------------------------------------------------------------- InfoBar'lar
@@ -162,13 +150,15 @@ def test_failed_alignment_shows_error_infobar_without_markers(window, qtbot) -> 
     assert not cv.diff_switch.isEnabled()
     assert not cv.before_view.image_rect.isEmpty()          # görüntüler yine de gösterilir
     assert not cv.after_view.image_rect.isEmpty()
-    assert cv.ai_panel.state() == "failed"
+    assert cv.result_panel.state() == "failed"
+    assert not cv.match_pill.isHidden() and cv.match_pill.text() == "Eşleşme %75"   # 90/120
 
 
 def test_weak_alignment_shows_warning_infobar(window) -> None:
     cv = window.compare_view
     cv.show_result(make_result(320, 240, quality=AlignmentQuality.WEAK))
     assert ("warning", "Hizalama zayıf") in cv.active_infobars()
+    assert any("%75" in b.content for b in cv._infobars)
     assert cv.visible_region_count()[0] == 0 or True         # animasyon sonrası görünür olur
     assert len(cv.before_view.region_items()) == 3
 
@@ -177,47 +167,62 @@ def test_good_alignment_has_no_infobar(cv) -> None:
     assert cv.active_infobars() == []
 
 
-# --------------------------------------------------------------------------- AI paneli
+# --------------------------------------------------------------------------- sonuç paneli
 
-def test_ai_panel_filled_state(cv) -> None:
-    panel = cv.ai_panel
+def test_result_panel_shows_match_percent_and_stats(cv) -> None:
+    panel = cv.result_panel
     assert panel.state() == "ready"
-    assert panel.summary_label.text() == SUMMARY
+    assert panel.gauge.percent() == pytest.approx(75.0) and panel.gauge.text() == "%75"
+    assert panel.points_stat.value() == "90 / 120"
+    assert panel.regions_stat.value() == "3"
+    assert panel.overlap_stat.value() == "%100"
+    assert panel.changed_stat.value().startswith("%")
+    assert panel.quality_pill.text() == "Hizalama iyi"
     assert len(panel.cards()) == 3
-    card = panel.cards()[3]
-    assert card.region.verdict is ChangeVerdict.FALSE_ALARM
-    assert "%88" in card.confidence_label.text()
-    assert "Gölge" in card.description_label.text()
-    assert panel.model_pill.text() == "Gemma 4 12B" or panel.model_pill.text()
+    card = panel.cards()[1]
+    assert "0.91" in card.score_label.text() and "px" in card.area_label.text()
 
 
-def test_ai_panel_off_state_has_interpret_button(window, qtbot) -> None:
+def test_match_pill_in_header(cv) -> None:
+    assert not cv.match_pill.isHidden() and cv.match_pill.text() == "Eşleşme %75"
+
+
+def test_changed_area_percent() -> None:
+    from app.ui.result_panel import changed_area_percent
+
+    result = make_result(100, 100)
+    total = sum(r.area_px for r in result.detection.regions)
+    assert changed_area_percent(result) == pytest.approx(total / 100)
+    result.registration.valid_mask[:] = False
+    assert changed_area_percent(result) == 0.0
+
+
+def test_result_panel_has_no_ai_controls(cv) -> None:
+    assert not hasattr(cv, "ai_panel") and not hasattr(cv, "hide_false_check") and not hasattr(cv, "interpret")
+
+
+def test_result_panel_loading_idle_and_empty_states(window) -> None:
     cv = window.compare_view
-    cv.show_result(make_result(320, 240, with_llm=False))
-    panel = cv.ai_panel
-    panel.set_interpret_available(True)                     # worktree'de model yok; etkin durumu zorla
-    assert panel.state() == "off"
-    assert panel.off_state.title_label.text() == "Yapay zekâ yorumu kapalı"
-    assert panel.off_state.button.text() == "Yorumla"
-    assert len(panel.cards()) == 3                         # bölgeler yine de listelenir (incelenmedi)
-    assert all(c.region.verdict is ChangeVerdict.UNREVIEWED for c in panel.cards().values())
-    with qtbot.waitSignal(panel.interpretRequested):
-        panel.off_state.button.click()
-
-
-def test_ai_panel_loading_state_and_empty_results(window) -> None:
-    cv = window.compare_view
-    cv.ai_panel.show_loading()
-    assert cv.ai_panel.state() == "loading" and cv.ai_panel._shimmer.state().name == "Running"
-    cv.ai_panel.set_result(None)
-    assert cv.ai_panel.state() == "off"
+    cv.result_panel.show_loading()
+    assert cv.result_panel.state() == "loading" and not cv.result_panel.summary_host.isVisible()
+    cv.result_panel.set_result(None)
+    assert cv.result_panel.state() == "idle"
     result = make_result(320, 240)
     result.detection.regions = []
     cv.show_result(result)
-    assert cv.ai_panel.state() == "empty"
+    assert cv.result_panel.state() == "empty"
+    assert cv.result_panel.gauge.text() == "%75"            # değişiklik yokken de eşleşme görünür
 
 
-def test_ai_panel_splitter_collapsible(cv) -> None:
+def test_no_matches_shows_dash(window) -> None:
+    cv = window.compare_view
+    result = make_result(320, 240, quality=AlignmentQuality.FAILED)
+    result.registration.num_matches = result.registration.num_inliers = 0
+    cv.show_result(result)
+    assert cv.result_panel.gauge.text() == "—" and cv.match_pill.text() == "Eşleşme yok"
+
+
+def test_result_panel_splitter_collapsible(cv) -> None:
     assert cv.main_splitter.isCollapsible(1)
     cv.main_splitter.setSizes([cv.main_splitter.height(), 0])
     assert cv.main_splitter.sizes()[1] == 0
@@ -230,8 +235,9 @@ def test_export_writes_png_csv_and_summary(cv, tmp_path: Path) -> None:
     assert [p.suffix for p in written] == [".png", ".csv", ".txt"]
     assert all(p.exists() and p.stat().st_size > 0 for p in written)
     csv_text = written[1].read_text(encoding="utf-8-sig")
-    assert "Gerçek değişiklik" in csv_text and csv_text.count("\n") == 4
-    assert SUMMARY in written[2].read_text(encoding="utf-8")
+    assert csv_text.splitlines()[0] == "No;X;Y;Genişlik;Yükseklik;Alan_px;Skor" and csv_text.count("\n") == 4
+    summary = written[2].read_text(encoding="utf-8")
+    assert "Hizalama eşleşmesi: %75" in summary and "Bölge sayısı: 3" in summary
     from PIL import Image
 
     with Image.open(written[0]) as img:
@@ -252,15 +258,12 @@ def test_export_without_boxes_when_switch_off(cv, tmp_path: Path) -> None:
 
 def test_open_pair_runs_pipeline_saves_and_reuses_cache(window, populated, qtbot, tmp_path) -> None:
     library, _, recs = populated
-    from tests.ui.test_phase3_llm import _enable_llm
-    _enable_llm(window, tmp_path)           # LLM yalnızca model + exe mevcutsa otomatik çalışır
     registrar = InstantRegistrar()
     calls = []
     original = registrar.register
     registrar.register = lambda b, a: (calls.append(1), original(b, a))[1]
     config = make_pipeline().config
-    set_default_pipeline(Pipeline(InstantPreprocessor(), registrar, InstantDetector(),
-                                  analyst_factory=lambda: InstantAnalyst(), config=config))
+    set_default_pipeline(Pipeline(InstantPreprocessor(), registrar, InstantDetector(), config=config))
     cv = window.compare_view
     window.open_compare(recs[0], recs[1])
     assert cv.progress_host.isVisible()                      # ilerleme çubuğu hemen görünür
@@ -268,7 +271,7 @@ def test_open_pair_runs_pipeline_saves_and_reuses_cache(window, populated, qtbot
     _wait_idle(qtbot, cv)
     assert not cv.progress_host.isVisible()
     assert cv.visible_region_count()[0] == 3 or len(cv.before_view.region_items()) == 3
-    assert cv.ai_panel.state() == "ready" and cv.ai_panel.summary_label.text() == SUMMARY
+    assert cv.result_panel.state() == "ready" and cv.result_panel.gauge.text() == "%80"   # 80/100
     assert len(calls) == 1
     assert library.find_comparison(recs[0], recs[1]) is not None
     assert window.library_view.history_layout.count() == 2   # geçmiş güncellendi
@@ -278,7 +281,7 @@ def test_open_pair_runs_pipeline_saves_and_reuses_cache(window, populated, qtbot
     qtbot.waitUntil(lambda: cv._result is not None, timeout=15000)
     _wait_idle(qtbot, cv)
     assert len(calls) == 1
-    assert cv.ai_panel.state() == "ready"
+    assert cv.result_panel.state() == "ready" and cv.match_pill.text() == "Eşleşme %80"   # kayıttan da aynı
     assert [i.region_id for i in cv.before_view.region_items()] == [1, 2, 3]
 
 
@@ -344,19 +347,3 @@ def test_pipeline_error_shows_error_infobar(window, populated, qtbot) -> None:
     window.open_compare(recs[0], recs[1])
     qtbot.waitUntil(lambda: any(t == "Karşılaştırma başarısız" for _, t in cv.active_infobars()), timeout=10000)
     _wait_idle(qtbot, cv)
-
-
-def test_interpret_button_runs_llm_later(window, populated, qtbot, tmp_path) -> None:
-    _, _, recs = populated
-    from tests.ui.test_phase3_llm import _enable_llm
-    _enable_llm(window, tmp_path)                           # model + exe var: "Yorumla" etkin
-    set_default_pipeline(make_pipeline())
-    cv = window.compare_view
-    cv.open_pair(recs[0], recs[1], use_llm=False)           # açılışta yorum yok
-    qtbot.waitUntil(lambda: cv._result is not None, timeout=15000)
-    _wait_idle(qtbot, cv)
-    assert cv.ai_panel.state() == "off"
-    cv.ai_panel.off_state.button.click()
-    qtbot.waitUntil(lambda: cv._result is not None and cv._result.llm_used, timeout=15000)
-    _wait_idle(qtbot, cv)
-    assert cv.ai_panel.state() == "ready"

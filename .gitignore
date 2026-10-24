@@ -7,8 +7,7 @@ dist/
 *.spec
 models/*
 !models/.gitkeep
-bin/llama/*
-!bin/llama/.gitkeep
+
 *.sqlite3
 .pytest_cache/
 tests/data/synthetic/
@@ -18,3 +17,6 @@ tests/data/synthetic/
 /karsilastirma*.csv
 /karsilastirma*.txt
 !packaging/*.spec
+
+.venv-cpu/
+/exeler/

@@ -140,9 +140,9 @@ def test_settings_change_calls_configure_with_new_config(window, qtbot, monkeypa
     sv.device_combo.setCurrentIndex(2)
     qtbot.waitUntil(lambda: len(calls) == 3, timeout=3000)
     assert calls[2].runtime.device == "cpu"
-    sv.llm_switch.setChecked(False)
+    sv.method_combo.setCurrentIndex(0)
     qtbot.waitUntil(lambda: len(calls) == 4, timeout=3000)
-    assert calls[3].llm.enabled is False
+    assert calls[3].detection.method == "ssim"
     assert "bir sonraki açılışta" not in " ".join(
         w.text() for w in sv.findChildren(type(sv.sens_label)) if hasattr(w, "text"))
 
@@ -273,49 +273,6 @@ def test_warm_up_imports_targets() -> None:
     src = inspect.getsource(workers.warm_up_imports)
     for name in ("torch", "lightglue", "core.registration", "core.detection"):
         assert name in src
-
-
-# ------------------------------------------------------------ 6. Yorumla durumu
-
-def test_interpret_disabled_when_model_missing(window) -> None:
-    panel = window.compare_view.ai_panel
-    assert window.config.llm.enabled
-    assert not panel.interpret_enabled()
-    assert not panel.off_state.button.isEnabled()
-    assert "scripts/download_models.py --only gemma-12b" in panel.off_state.text_label.text()
-    assert "Gemma modeli indirilmemiş" in panel.off_state.text_label.text()
-
-
-def test_interpret_message_when_llm_disabled_in_settings(window) -> None:
-    window.settings_view.llm_switch.setChecked(False)
-    panel = window.compare_view.ai_panel
-    assert not panel.off_state.button.isEnabled()
-    assert "ayarlarda kapalı" in panel.off_state.title_label.text()
-
-
-def test_interpret_enabled_when_model_and_server_exist(window, tmp_path: Path) -> None:
-    cfg = window.config
-    models = tmp_path / "models"
-    gguf = cfg.llm.model_spec.gguf_path(models)
-    gguf.parent.mkdir(parents=True)
-    gguf.write_bytes(b"x")
-    cfg.llm.model_spec.mmproj_path(models).write_bytes(b"x")
-    bin_dir = tmp_path / "bin"
-    (bin_dir / "llama").mkdir(parents=True)
-    (bin_dir / "llama" / "llama-server.exe").write_bytes(b"x")
-    cfg.paths.models_dir, cfg.paths.bin_dir = models, bin_dir
-    window._refresh_llm_status()
-    panel = window.compare_view.ai_panel
-    assert panel.interpret_enabled() and panel.off_state.button.isEnabled()
-    assert window.status_bar.llm_label.text().startswith("Gemma: hazır")
-
-
-def test_interpret_noop_when_disabled(window, populated) -> None:
-    _, _, recs = populated
-    cv = window.compare_view
-    cv._before_rec, cv._after_rec = recs[0], recs[1]
-    cv.interpret()
-    assert not cv.is_busy()
 
 
 # ------------------------------------------------------------ 9. ısı haritası

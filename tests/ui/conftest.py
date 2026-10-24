@@ -68,9 +68,8 @@ def window(qtbot, populated, tmp_path: Path):
     library, _, _ = populated
     config = AppConfig()
     config.paths.library_dir = library.root
-    # Gerçek models/ ve bin/ (Gemma indirili olabilir) testleri etkilemesin: boş klasörler.
+    # Gerçek models/ testleri etkilemesin: boş klasör.
     config.paths.models_dir = tmp_path / "models_yok"
-    config.paths.bin_dir = tmp_path / "bin_yok"
     win = MainWindow(
         library, config, UiPrefs(), tmp_path / "config.json", tmp_path / "prefs.json", probe_device=False
     )

@@ -17,11 +17,11 @@ görevin işin gerçekten çalıştığını doğrulamak.
    Bir modül başka modülün iç fonksiyonunu import ediyor mu? (Grep ile kontrol et.)
 3. **Offline kuralı:** Kodda çalışma zamanında ağ çağrısı var mı? Grep:
    `from_pretrained`, `torch.hub`, `requests.get`, `urlopen`, `http://`, `https://`
-   (`scripts/download_models.py` ve llama-server için `127.0.0.1` istisna).
+   (`scripts/download_models.py` istisna).
 4. **Windows uyumu:** Sabit `/` ile yol birleştirme, `os.path` yerine `pathlib` kullanımı,
    POSIX'e özgü çağrılar.
 5. **UI thread:** Ağır işlemler UI thread'inde mi çalışıyor?
-6. **Hata durumları:** Model dosyası yok, hizalama FAILED, LLM kapalı, bozuk görüntü dosyası,
+6. **Hata durumları:** Model dosyası yok, hizalama FAILED, bozuk görüntü dosyası,
    çok küçük/çok büyük görüntü.
 
 ## Entegrasyon testleri (`tests/integration/`)
